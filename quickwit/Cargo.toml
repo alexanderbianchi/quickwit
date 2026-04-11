@@ -413,6 +413,7 @@ tantivy = { git = "https://github.com/quickwit-oss/tantivy/", rev = "1e859fd", d
   "zstd-compression",
   "columnar-zstd-compression",
 ] }
+tantivy-datafusion = { path = "/Users/alex.bianchi/oss/tantivy-datafusion" }
 tantivy-fst = "0.5"
 
 # This is actually not used directly the goal is to fix the version
@@ -421,6 +422,11 @@ encoding_rs = "=0.8.35"
 
 [patch.crates-io]
 sasl2-sys = { git = "https://github.com/quickwit-oss/rust-sasl/", rev = "085a4c7" }
+
+# Unify tantivy-datafusion's tantivy fork with quickwit's tantivy fork
+# so the entire workspace uses a single tantivy version.
+[patch."https://github.com/alexanderbianchi/tantivy.git"]
+tantivy = { git = "https://github.com/quickwit-oss/tantivy/", rev = "545169c0d8" }
 
 ## this patched version of tracing helps better understand what happens inside futures (when are
 ## they polled, how long does poll take...)

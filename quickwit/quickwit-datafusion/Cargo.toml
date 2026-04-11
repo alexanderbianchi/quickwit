@@ -27,11 +27,16 @@ url = "2"
 
 quickwit-common = { workspace = true }
 quickwit-df-core = { workspace = true, features = ["grpc"] }
+quickwit-directories = { workspace = true }
 quickwit-metastore = { workspace = true }
 quickwit-parquet-engine = { workspace = true }
 quickwit-proto = { workspace = true }
 quickwit-search = { workspace = true }
 quickwit-storage = { workspace = true }
+
+rayon = { workspace = true }
+tantivy = { workspace = true }
+tantivy-datafusion = { workspace = true }
 
 arrow = { workspace = true }
 datafusion = "53"
