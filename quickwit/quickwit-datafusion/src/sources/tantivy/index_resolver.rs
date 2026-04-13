@@ -19,6 +19,7 @@
 
 use std::sync::Arc;
 
+use arrow::datatypes::{DataType, Field, Schema};
 use async_trait::async_trait;
 use datafusion::error::{DataFusionError, Result as DFResult};
 use quickwit_common::uri::Uri;
@@ -36,6 +37,19 @@ pub struct ResolvedIndex {
     pub index_uri: Uri,
     pub schema: Arc<arrow::datatypes::Schema>,
     pub tantivy_schema: tantivy::schema::Schema,
+}
+
+fn build_catalog_schema(tantivy_schema: &tantivy::schema::Schema) -> Arc<Schema> {
+    let fast_field_schema = tantivy_datafusion::tantivy_schema_to_arrow(tantivy_schema);
+    let mut fields: Vec<Field> = fast_field_schema
+        .fields()
+        .iter()
+        .filter(|field| field.name() != "_doc_id" && field.name() != "_segment_ord")
+        .map(|field| field.as_ref().clone())
+        .collect();
+    fields.push(Field::new("_score", DataType::Float32, true));
+    fields.push(Field::new("_document", DataType::Utf8, true));
+    Arc::new(Schema::new(fields))
 }
 
 #[async_trait]
@@ -90,7 +104,7 @@ impl TantivyIndexResolver for MetastoreTantivyResolver {
         let index_uid = index_metadata.index_uid.clone();
         let index_uri = index_metadata.index_config.index_uri.clone();
         let tantivy_schema = doc_mapper.schema().clone();
-        let schema = tantivy_datafusion::tantivy_schema_to_arrow(&tantivy_schema);
+        let schema = build_catalog_schema(&tantivy_schema);
 
         debug!(%index_uid, %index_uri, "resolved tantivy index metadata");
 

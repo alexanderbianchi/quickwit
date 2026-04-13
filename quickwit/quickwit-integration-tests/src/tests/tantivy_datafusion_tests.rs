@@ -340,6 +340,93 @@ async fn test_tantivy_full_text_search() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_tantivy_full_text_with_document_and_score() {
+    let sandbox = start_sandbox().await;
+    create_index_and_ingest(&sandbox).await;
+
+    let metastore = metastore_client(&sandbox);
+    let builder = session_builder(&sandbox, metastore);
+
+    let batches = run_sql(
+        &builder,
+        r#"SELECT _document, _score
+           FROM "tantivy-df-test"
+           WHERE full_text('message', 'timeout')
+           ORDER BY _score DESC
+           LIMIT 5"#,
+    )
+    .await;
+
+    assert_eq!(total_rows(&batches), 1);
+    let batch = &batches[0];
+    assert!(matches!(
+        batch.column_by_name("_document").unwrap().data_type(),
+        DataType::Utf8 | DataType::Utf8View
+    ));
+    assert_eq!(
+        batch.column_by_name("_score").unwrap().data_type(),
+        &DataType::Float32
+    );
+
+    let docs = utf8_values(batch.column_by_name("_document").unwrap());
+    assert!(docs.value(0).contains("timeout"));
+    let scores = batch
+        .column_by_name("_score")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::Float32Array>()
+        .unwrap();
+    assert!(scores.value(0).is_finite());
+
+    sandbox.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_tantivy_distributed_full_text_with_document_and_score() {
+    unsafe {
+        std::env::set_var("QW_DISABLE_TELEMETRY", "1");
+        std::env::set_var("QW_ENABLE_DATAFUSION_ENDPOINT", "true");
+    }
+    quickwit_common::setup_logging_for_tests();
+
+    let sandbox = ClusterSandboxBuilder::default()
+        .add_node(QuickwitService::supported_services())
+        .add_node([QuickwitService::Searcher])
+        .build_and_start()
+        .await;
+    create_index_and_ingest_two_splits(&sandbox).await;
+
+    let metastore = metastore_client(&sandbox);
+    let builder = distributed_session_builder(&sandbox, metastore);
+
+    let batches = run_sql(
+        &builder,
+        r#"SELECT _document, _score
+           FROM "tantivy-df-test"
+           WHERE full_text('message', 'timeout')
+           ORDER BY _score DESC
+           LIMIT 5"#,
+    )
+    .await;
+
+    assert_eq!(total_rows(&batches), 1);
+    let batch = &batches[0];
+    assert!(matches!(
+        batch.column_by_name("_document").unwrap().data_type(),
+        DataType::Utf8 | DataType::Utf8View
+    ));
+    assert_eq!(
+        batch.column_by_name("_score").unwrap().data_type(),
+        &DataType::Float32
+    );
+
+    let docs = utf8_values(batch.column_by_name("_document").unwrap());
+    assert!(docs.value(0).contains("timeout"));
+
+    sandbox.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_tantivy_count_with_filter() {
     let sandbox = start_sandbox().await;
     create_index_and_ingest(&sandbox).await;
