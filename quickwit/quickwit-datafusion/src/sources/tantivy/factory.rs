@@ -31,7 +31,6 @@ use datafusion::catalog::{Session, TableProviderFactory};
 use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::logical_expr::CreateExternalTable;
 use quickwit_proto::metastore::MetastoreServiceClient;
-use quickwit_search::SearcherContext;
 
 use super::index_resolver::TantivyIndexResolver;
 use super::table_provider::TantivyTableProvider;
@@ -42,19 +41,16 @@ pub const TANTIVY_FILE_TYPE: &str = "tantivy";
 pub struct TantivyTableProviderFactory {
     index_resolver: Arc<dyn TantivyIndexResolver>,
     metastore: MetastoreServiceClient,
-    searcher_context: Arc<SearcherContext>,
 }
 
 impl TantivyTableProviderFactory {
     pub fn new(
         index_resolver: Arc<dyn TantivyIndexResolver>,
         metastore: MetastoreServiceClient,
-        searcher_context: Arc<SearcherContext>,
     ) -> Self {
         Self {
             index_resolver,
             metastore,
-            searcher_context,
         }
     }
 }
@@ -85,9 +81,9 @@ impl TableProviderFactory for TantivyTableProviderFactory {
         let provider = TantivyTableProvider::with_schema(
             arrow_schema,
             self.metastore.clone(),
-            Arc::clone(&self.searcher_context),
             resolved.index_uid,
-            resolved.storage,
+            resolved.index_uri,
+            resolved.tantivy_schema,
         );
 
         Ok(Arc::new(provider))

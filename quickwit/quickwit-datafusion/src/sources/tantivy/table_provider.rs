@@ -12,136 +12,181 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `TantivyTableProvider` — DataFusion TableProvider for a quickwit tantivy index.
+//! `TantivyTableProvider` — DataFusion TableProvider for a Quickwit tantivy index.
 //!
-//! Schema is provided at construction time (via DDL or auto-resolve from the
-//! newest split). Splits are listed and opened only at `scan()` time.
+//! Schema is fixed at construction time (via DDL or index metadata). Splits are
+//! listed at `scan()` time, but not opened until execution on the worker.
 
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
 use datafusion::catalog::Session;
 use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
 use datafusion::physical_plan::ExecutionPlan;
+use quickwit_common::uri::Uri;
 use quickwit_metastore::{
     ListSplitsQuery, ListSplitsRequestExt, MetastoreServiceStreamSplitsExt, SplitMetadata,
     SplitState,
 };
-use quickwit_proto::metastore::{
-    ListSplitsRequest, MetastoreService, MetastoreServiceClient,
-};
-use quickwit_proto::search::SplitIdAndFooterOffsets;
+use quickwit_proto::metastore::{ListSplitsRequest, MetastoreService, MetastoreServiceClient};
 use quickwit_proto::types::IndexUid;
-use quickwit_search::SearcherContext;
-use quickwit_storage::Storage;
-use tantivy_datafusion::{DirectIndexOpener, IndexOpener, SingleTableProvider};
+use tantivy_datafusion::{SingleTableProvider, SplitDescriptor};
 use tracing::debug;
 
-use super::split_opener::QuickwitSplitOpener;
+use super::prepared_split_factory::QuickwitSplitPayload;
 
-/// TableProvider for a quickwit tantivy index.
-///
-/// Construction is cheap — only stores the schema and index coordinates.
-/// All split I/O is deferred to `scan()`.
 #[derive(Debug)]
 pub struct TantivyTableProvider {
     schema: SchemaRef,
     metastore: MetastoreServiceClient,
-    searcher_context: Arc<SearcherContext>,
     index_uid: IndexUid,
-    index_storage: Arc<dyn Storage>,
+    index_uri: Uri,
+    tantivy_schema: tantivy::schema::Schema,
+    multi_valued_fields: Vec<String>,
 }
 
 impl TantivyTableProvider {
-    /// Create with an explicit schema (from DDL or auto-resolve).
     pub fn with_schema(
         schema: SchemaRef,
         metastore: MetastoreServiceClient,
-        searcher_context: Arc<SearcherContext>,
         index_uid: IndexUid,
-        index_storage: Arc<dyn Storage>,
+        index_uri: Uri,
+        tantivy_schema: tantivy::schema::Schema,
     ) -> Self {
+        let multi_valued_fields = collect_declared_multi_valued_fields(&schema);
         Self {
             schema,
             metastore,
-            searcher_context,
             index_uid,
-            index_storage,
+            index_uri,
+            tantivy_schema,
+            multi_valued_fields,
         }
     }
 
-    /// Create by opening the most recent split to derive the schema.
-    ///
-    /// Used by the auto-resolve path when no DDL is provided. Opens exactly
-    /// one split — cheap enough for table resolution.
-    pub async fn try_from_index(
+    pub fn try_from_index(
         metastore: MetastoreServiceClient,
-        searcher_context: Arc<SearcherContext>,
-        index_uid: IndexUid,
-        index_storage: Arc<dyn Storage>,
-    ) -> DFResult<Self> {
-        let splits = list_published_splits(&metastore, &index_uid).await?;
-        if splits.is_empty() {
-            return Err(DataFusionError::Plan(format!(
-                "no published splits found for index '{}'",
-                index_uid.index_id
-            )));
-        }
-
-        let newest = splits
-            .iter()
-            .max_by_key(|s| s.create_timestamp)
-            .unwrap();
-
-        let (index, _) = open_split(&searcher_context, &index_storage, newest).await?;
-        // Derive the schema directly from the tantivy index without creating
-        // a full SingleTableProvider (which would compute partition stats and
-        // trigger synchronous fast field reads).
-        let ff_schema = tantivy_datafusion::tantivy_schema_to_arrow_from_index(&index);
-        let schema = build_unified_schema(&ff_schema);
-
-        Ok(Self {
-            schema,
+        resolved: super::index_resolver::ResolvedIndex,
+    ) -> Self {
+        Self::with_schema(
+            resolved.schema,
             metastore,
-            searcher_context,
-            index_uid,
-            index_storage,
-        })
+            resolved.index_uid,
+            resolved.index_uri,
+            resolved.tantivy_schema,
+        )
     }
 }
 
-/// Build the unified schema: fast fields + _score + _document.
-/// Mirrors `SingleTableProvider`'s schema without computing partition stats.
-fn build_unified_schema(ff_schema: &SchemaRef) -> SchemaRef {
-    use arrow::datatypes::{DataType, Field, Schema};
+fn collect_declared_multi_valued_fields(schema: &SchemaRef) -> Vec<String> {
+    schema
+        .fields()
+        .iter()
+        .filter(|field| matches!(field.data_type(), DataType::List(_)))
+        .map(|field| field.name().to_string())
+        .collect()
+}
 
+fn build_inner_fast_field_schema(requested_schema: &SchemaRef) -> SchemaRef {
+    let mut fields = Vec::new();
+
+    if requested_schema
+        .fields()
+        .iter()
+        .all(|field| field.name() != "_doc_id")
+    {
+        fields.push(Field::new("_doc_id", DataType::UInt32, false));
+    }
+    if requested_schema
+        .fields()
+        .iter()
+        .all(|field| field.name() != "_segment_ord")
+    {
+        fields.push(Field::new("_segment_ord", DataType::UInt32, false));
+    }
+
+    fields.extend(
+        requested_schema
+            .fields()
+            .iter()
+            .filter(|field| field.name() != "_score" && field.name() != "_document")
+            .map(|field| field.as_ref().clone()),
+    );
+
+    Arc::new(Schema::new(fields))
+}
+
+fn translate_projection(
+    requested_schema: &SchemaRef,
+    inner_schema: &SchemaRef,
+    projection: Option<&Vec<usize>>,
+) -> DFResult<Vec<usize>> {
+    let projected_indices: Vec<usize> = match projection {
+        Some(indices) => indices.clone(),
+        None => (0..requested_schema.fields().len()).collect(),
+    };
+
+    projected_indices
+        .into_iter()
+        .map(|projected_idx| {
+            let field = requested_schema
+                .fields()
+                .get(projected_idx)
+                .ok_or_else(|| {
+                    DataFusionError::Plan(format!(
+                        "projection index {projected_idx} is out of bounds for declared tantivy schema"
+                    ))
+                })?;
+
+            inner_schema.index_of(field.name()).map_err(|_| {
+                DataFusionError::Plan(format!(
+                    "declared tantivy field '{}' is not available in the index scan schema",
+                    field.name()
+                ))
+            })
+        })
+        .collect()
+}
+
+fn build_unified_schema(ff_schema: &SchemaRef) -> SchemaRef {
     let mut fields: Vec<Arc<Field>> = ff_schema.fields().to_vec();
     fields.push(Arc::new(Field::new("_score", DataType::Float32, true)));
     fields.push(Arc::new(Field::new("_document", DataType::Utf8, true)));
     Arc::new(Schema::new(fields))
 }
 
-fn split_to_footer(split: &SplitMetadata) -> SplitIdAndFooterOffsets {
-    SplitIdAndFooterOffsets {
+fn split_descriptor(
+    index_uri: &Uri,
+    tantivy_schema: &tantivy::schema::Schema,
+    multi_valued_fields: &[String],
+    split: &SplitMetadata,
+) -> DFResult<SplitDescriptor> {
+    let payload = QuickwitSplitPayload {
+        index_uri: index_uri.to_string(),
         split_id: split.split_id.clone(),
         split_footer_start: split.footer_offsets.start,
         split_footer_end: split.footer_offsets.end,
-        timestamp_start: split.time_range.as_ref().map(|tr| *tr.start()),
-        timestamp_end: split.time_range.as_ref().map(|tr| *tr.end()),
-        num_docs: split.num_docs as u64,
-    }
+    };
+    let payload_bytes = serde_json::to_vec(&payload)
+        .map_err(|e| DataFusionError::Internal(format!("encode split payload: {e}")))?;
+    Ok(SplitDescriptor::new(
+        split.split_id.clone(),
+        payload_bytes,
+        tantivy_schema.clone(),
+        multi_valued_fields.to_vec(),
+    ))
 }
 
 async fn list_published_splits(
     metastore: &MetastoreServiceClient,
     index_uid: &IndexUid,
 ) -> DFResult<Vec<SplitMetadata>> {
-    let query = ListSplitsQuery::for_index(index_uid.clone())
-        .with_split_state(SplitState::Published);
+    let query =
+        ListSplitsQuery::for_index(index_uid.clone()).with_split_state(SplitState::Published);
     let request = ListSplitsRequest::try_from_list_splits_query(&query)
         .map_err(|err| DataFusionError::Internal(format!("failed to build split query: {err}")))?;
     metastore
@@ -152,54 +197,6 @@ async fn list_published_splits(
         .collect_splits_metadata()
         .await
         .map_err(|err| DataFusionError::Internal(format!("failed to collect splits: {err}")))
-}
-
-async fn open_split(
-    searcher_context: &Arc<SearcherContext>,
-    index_storage: &Arc<dyn Storage>,
-    split: &SplitMetadata,
-) -> DFResult<(tantivy::Index, quickwit_directories::HotDirectory)> {
-    let footer = split_to_footer(split);
-    let ephemeral_cache = quickwit_storage::ByteRangeCache::with_infinite_capacity(
-        &quickwit_storage::STORAGE_METRICS.shortlived_cache,
-    );
-    quickwit_search::leaf::open_index_with_caches(
-        searcher_context,
-        Arc::clone(index_storage),
-        &footer,
-        None,
-        Some(ephemeral_cache),
-    )
-    .await
-    .map_err(|err| {
-        DataFusionError::Internal(format!(
-            "failed to open split '{}': {err}",
-            split.split_id
-        ))
-    })
-}
-
-async fn build_openers(
-    searcher_context: &Arc<SearcherContext>,
-    index_storage: &Arc<dyn Storage>,
-    splits: &[SplitMetadata],
-) -> DFResult<Vec<Arc<dyn IndexOpener>>> {
-    let mut openers: Vec<Arc<dyn IndexOpener>> = Vec::with_capacity(splits.len());
-    for split in splits {
-        let footer = split_to_footer(split);
-        let (index, _) = open_split(searcher_context, index_storage, split).await?;
-        let direct = DirectIndexOpener::new(index);
-        let opener = QuickwitSplitOpener::new(
-            Arc::clone(searcher_context),
-            Arc::clone(index_storage),
-            footer,
-            direct.schema(),
-            direct.segment_sizes(),
-            direct.multi_valued_fields(),
-        );
-        openers.push(Arc::new(opener));
-    }
-    Ok(openers)
 }
 
 #[async_trait]
@@ -222,10 +219,8 @@ impl TableProvider for TantivyTableProvider {
     ) -> DFResult<Vec<TableProviderFilterPushDown>> {
         Ok(filters
             .iter()
-            .map(|f| {
-                if tantivy_datafusion::extract_full_text_call(f).is_some() {
-                    // full_text() is fully handled by tantivy's inverted index —
-                    // tell DataFusion not to keep it as a post-filter.
+            .map(|filter| {
+                if tantivy_datafusion::extract_full_text_call(filter).is_some() {
                     TableProviderFilterPushDown::Exact
                 } else {
                     TableProviderFilterPushDown::Inexact
@@ -245,15 +240,81 @@ impl TableProvider for TantivyTableProvider {
         debug!(
             index_uid = %self.index_uid,
             num_splits = splits.len(),
-            "opening splits for tantivy scan"
+            "planning tantivy split descriptors"
         );
-        let openers = build_openers(
-            &self.searcher_context,
-            &self.index_storage,
-            &splits,
-        )
-        .await?;
-        let inner = SingleTableProvider::from_splits(openers)?;
-        inner.scan(state, projection, filters, limit).await
+
+        let split_descriptors = splits
+            .iter()
+            .map(|split| {
+                split_descriptor(
+                    &self.index_uri,
+                    &self.tantivy_schema,
+                    &self.multi_valued_fields,
+                    split,
+                )
+            })
+            .collect::<DFResult<Vec<_>>>()?;
+
+        let inner = SingleTableProvider::from_split_descriptors_with_fast_field_schema(
+            split_descriptors,
+            build_inner_fast_field_schema(&self.schema),
+        )?;
+        let translated_projection = translate_projection(
+            &self.schema,
+            &build_unified_schema(&build_inner_fast_field_schema(&self.schema)),
+            projection,
+        )?;
+        inner
+            .scan(state, Some(&translated_projection), filters, limit)
+            .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn schema(fields: Vec<Field>) -> SchemaRef {
+        Arc::new(Schema::new(fields))
+    }
+
+    #[test]
+    fn test_build_inner_fast_field_schema_prepends_hidden_columns() {
+        let requested_schema = schema(vec![
+            Field::new("severity", DataType::Utf8, true),
+            Field::new("timestamp", DataType::Int64, true),
+        ]);
+
+        let inner_fast_field_schema = build_inner_fast_field_schema(&requested_schema);
+        let field_names: Vec<_> = inner_fast_field_schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+
+        assert_eq!(
+            field_names,
+            vec!["_doc_id", "_segment_ord", "severity", "timestamp"]
+        );
+    }
+
+    #[test]
+    fn test_translate_projection_uses_declared_field_names() {
+        let requested_schema = schema(vec![
+            Field::new("severity", DataType::Utf8, true),
+            Field::new("_score", DataType::Float32, true),
+            Field::new("timestamp", DataType::Int64, true),
+        ]);
+        let inner_fast_field_schema = build_inner_fast_field_schema(&requested_schema);
+        let inner_schema = build_unified_schema(&inner_fast_field_schema);
+
+        assert_eq!(
+            translate_projection(&requested_schema, &inner_schema, None).unwrap(),
+            vec![2, 4, 3]
+        );
+        assert_eq!(
+            translate_projection(&requested_schema, &inner_schema, Some(&vec![0, 2])).unwrap(),
+            vec![2, 3]
+        );
     }
 }

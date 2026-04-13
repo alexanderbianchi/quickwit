@@ -14,50 +14,44 @@
 
 //! Index resolution for the tantivy/logs data source.
 //!
-//! `MetastoreTantivyResolver` resolves an index name to a storage handle and
-//! split metadata needed to construct `QuickwitSplitOpener` instances.
+//! Planning resolves index metadata and the canonical schema from the metastore
+//! and doc mapper only. It does not open any splits.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use datafusion::error::Result as DFResult;
+use datafusion::error::{DataFusionError, Result as DFResult};
+use quickwit_common::uri::Uri;
+use quickwit_config::build_doc_mapper;
 use quickwit_metastore::{IndexMetadataResponseExt, ListIndexesMetadataResponseExt};
 use quickwit_proto::metastore::{
     IndexMetadataRequest, ListIndexesMetadataRequest, MetastoreService, MetastoreServiceClient,
 };
 use quickwit_proto::types::IndexUid;
-use quickwit_storage::{Storage, StorageResolver};
 use tracing::debug;
 
-/// Resources needed to scan a tantivy index: the index UID and a storage handle.
+/// Planner-visible information about a Quickwit index.
 pub struct ResolvedIndex {
     pub index_uid: IndexUid,
-    pub storage: Arc<dyn Storage>,
+    pub index_uri: Uri,
+    pub schema: Arc<arrow::datatypes::Schema>,
+    pub tantivy_schema: tantivy::schema::Schema,
 }
 
-/// Resolves an index name to the resources needed for scanning.
 #[async_trait]
 pub trait TantivyIndexResolver: Send + Sync + std::fmt::Debug {
-    /// Resolve an index name to its UID and storage handle.
     async fn resolve(&self, index_name: &str) -> DFResult<ResolvedIndex>;
-
-    /// List all index names available from this resolver.
     async fn list_index_names(&self) -> DFResult<Vec<String>>;
 }
 
-/// Production resolver backed by the quickwit metastore.
 #[derive(Clone)]
 pub struct MetastoreTantivyResolver {
     metastore: MetastoreServiceClient,
-    storage_resolver: StorageResolver,
 }
 
 impl MetastoreTantivyResolver {
-    pub fn new(metastore: MetastoreServiceClient, storage_resolver: StorageResolver) -> Self {
-        Self {
-            metastore,
-            storage_resolver,
-        }
+    pub fn new(metastore: MetastoreServiceClient) -> Self {
+        Self { metastore }
     }
 }
 
@@ -77,26 +71,34 @@ impl TantivyIndexResolver for MetastoreTantivyResolver {
             .clone()
             .index_metadata(IndexMetadataRequest::for_index_id(index_name.to_string()))
             .await
-            .map_err(|err| datafusion::error::DataFusionError::External(Box::new(err)))?;
+            .map_err(|err| DataFusionError::External(Box::new(err)))?;
 
         let index_metadata = response
             .deserialize_index_metadata()
-            .map_err(|err| datafusion::error::DataFusionError::External(Box::new(err)))?;
+            .map_err(|err| DataFusionError::External(Box::new(err)))?;
+
+        let doc_mapper = build_doc_mapper(
+            &index_metadata.index_config.doc_mapping,
+            &index_metadata.index_config.search_settings,
+        )
+        .map_err(|err| {
+            DataFusionError::Internal(format!(
+                "failed to build doc mapper for '{index_name}': {err}"
+            ))
+        })?;
 
         let index_uid = index_metadata.index_uid.clone();
-        let index_uri = &index_metadata.index_config.index_uri;
+        let index_uri = index_metadata.index_config.index_uri.clone();
+        let tantivy_schema = doc_mapper.schema().clone();
+        let schema = tantivy_datafusion::tantivy_schema_to_arrow(&tantivy_schema);
 
         debug!(%index_uid, %index_uri, "resolved tantivy index metadata");
 
-        let storage = self
-            .storage_resolver
-            .resolve(index_uri)
-            .await
-            .map_err(|err| datafusion::error::DataFusionError::External(Box::new(err)))?;
-
         Ok(ResolvedIndex {
             index_uid,
-            storage,
+            index_uri,
+            schema,
+            tantivy_schema,
         })
     }
 
@@ -106,12 +108,12 @@ impl TantivyIndexResolver for MetastoreTantivyResolver {
             .clone()
             .list_indexes_metadata(ListIndexesMetadataRequest::all())
             .await
-            .map_err(|err| datafusion::error::DataFusionError::External(Box::new(err)))?;
+            .map_err(|err| DataFusionError::External(Box::new(err)))?;
 
         let indexes = response
             .deserialize_indexes_metadata()
             .await
-            .map_err(|err| datafusion::error::DataFusionError::External(Box::new(err)))?;
+            .map_err(|err| DataFusionError::External(Box::new(err)))?;
 
         Ok(indexes
             .into_iter()

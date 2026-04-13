@@ -21,8 +21,8 @@ use std::sync::Arc;
 
 use arrow::array::{Array, Float64Array, Int64Array, RecordBatch};
 use datafusion::prelude::SessionContext;
-use tantivy::schema::{FAST, INDEXED, STORED, SchemaBuilder, STRING, TEXT};
-use tantivy_datafusion::{SingleTableProvider, full_text_udf};
+use tantivy::schema::{SchemaBuilder, FAST, INDEXED, STORED, STRING, TEXT};
+use tantivy_datafusion::{full_text_udf, SingleTableProvider};
 
 /// Create a tantivy index in a temporary directory with the given documents.
 fn build_test_index(docs: &[serde_json::Value]) -> tantivy::Index {
@@ -46,26 +46,14 @@ fn build_test_index(docs: &[serde_json::Value]) -> tantivy::Index {
     for doc_value in docs {
         let doc_obj = doc_value.as_object().unwrap();
         let mut tantivy_doc = tantivy::TantivyDocument::new();
-        tantivy_doc.add_i64(
-            timestamp_field,
-            doc_obj["timestamp"].as_i64().unwrap(),
-        );
-        tantivy_doc.add_text(
-            severity_field,
-            doc_obj["severity"].as_str().unwrap(),
-        );
+        tantivy_doc.add_i64(timestamp_field, doc_obj["timestamp"].as_i64().unwrap());
+        tantivy_doc.add_text(severity_field, doc_obj["severity"].as_str().unwrap());
         tantivy_doc.add_f64(
             response_time_field,
             doc_obj["response_time"].as_f64().unwrap(),
         );
-        tantivy_doc.add_text(
-            message_field,
-            doc_obj["message"].as_str().unwrap(),
-        );
-        tantivy_doc.add_text(
-            service_field,
-            doc_obj["service"].as_str().unwrap(),
-        );
+        tantivy_doc.add_text(message_field, doc_obj["message"].as_str().unwrap());
+        tantivy_doc.add_text(service_field, doc_obj["service"].as_str().unwrap());
         writer.add_document(tantivy_doc).unwrap();
     }
 
@@ -156,11 +144,7 @@ async fn test_fast_field_filter() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_aggregation_sum() {
     let index = build_test_index(&sample_log_docs());
-    let batches = run_tantivy_sql(
-        index,
-        "SELECT SUM(response_time) as total_rt FROM logs",
-    )
-    .await;
+    let batches = run_tantivy_sql(index, "SELECT SUM(response_time) as total_rt FROM logs").await;
 
     assert_eq!(total_rows(&batches), 1);
     let total = batches[0]
@@ -192,8 +176,8 @@ async fn test_aggregation_group_by() {
     let cnt_col = batch.column_by_name("cnt").unwrap();
 
     // Cast service column to plain Utf8 for easy comparison
-    let service_strings = arrow::compute::cast(service_col, &arrow::datatypes::DataType::Utf8)
-        .unwrap();
+    let service_strings =
+        arrow::compute::cast(service_col, &arrow::datatypes::DataType::Utf8).unwrap();
     let service_arr = service_strings
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
