@@ -676,6 +676,9 @@ pub async fn serve_quickwit(
         ))
     };
 
+    #[cfg(feature = "datafusion")]
+    let searcher_context_for_df = Arc::clone(&searcher_context);
+
     let (search_job_placer, search_service, searcher_pool) = setup_searcher(
         &node_config,
         cluster.change_stream(),
@@ -700,6 +703,7 @@ pub async fn serve_quickwit(
         cluster.change_stream(),
         metastore_through_control_plane.clone(),
         storage_resolver.clone(),
+        searcher_context_for_df,
     )?;
     // The search job placer owns a clone of this pool; the local binding is not
     // needed after the searcher and DataFusion setup paths have registered

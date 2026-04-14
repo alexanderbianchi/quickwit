@@ -17,10 +17,10 @@ mod ingest_v1_tests;
 mod ingest_v2_tests;
 #[cfg(feature = "datafusion")]
 mod metrics_distributed_tests;
-mod tantivy_datafusion_tests;
 mod no_cp_tests;
 mod otlp_tests;
 #[cfg(feature = "sqs-localstack-tests")]
 mod sqs_tests;
+mod tantivy_datafusion_tests;
 mod tls_tests;
 mod update_tests;

@@ -26,14 +26,14 @@ use datafusion::physical_plan::common::collect as collect_stream;
 use datafusion_substrait::logical_plan::producer::to_substrait_plan;
 use prost::Message;
 use quickwit_config::service::QuickwitService;
-use quickwit_datafusion::sources::tantivy::TantivyDataSource;
 use quickwit_datafusion::DataFusionSessionBuilder;
+use quickwit_datafusion::sources::tantivy::TantivyDataSource;
 use quickwit_metastore::SplitState;
 use quickwit_proto::metastore::MetastoreServiceClient;
 use quickwit_rest_client::rest_client::CommitType;
-use quickwit_search::{create_search_client_from_grpc_addr, SearcherContext, SearcherPool};
+use quickwit_search::{SearcherContext, SearcherPool, create_search_client_from_grpc_addr};
 
-use crate::test_utils::{ingest, ClusterSandbox, ClusterSandboxBuilder};
+use crate::test_utils::{ClusterSandbox, ClusterSandboxBuilder, ingest};
 
 // ── Setup ──────────────────────────────────────────────────────────
 

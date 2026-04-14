@@ -34,7 +34,10 @@ pub fn batches_to_pretty_string(batches: &[RecordBatch]) -> String {
         return "(empty result set)\n".to_string();
     }
     match pretty_format_batches(batches) {
-        Ok(table) => format!("{table}\n({} rows)\n", batches.iter().map(|b| b.num_rows()).sum::<usize>()),
+        Ok(table) => format!(
+            "{table}\n({} rows)\n",
+            batches.iter().map(|b| b.num_rows()).sum::<usize>()
+        ),
         Err(err) => format!("(error formatting results: {err})\n"),
     }
 }

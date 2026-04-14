@@ -45,7 +45,7 @@ use quickwit_search::SearcherContext;
 use quickwit_storage::StorageResolver;
 use tantivy_datafusion::{SplitRuntimeFactoryExt, TantivyCodec};
 
-use self::factory::{TantivyTableProviderFactory, TANTIVY_FILE_TYPE};
+use self::factory::{TANTIVY_FILE_TYPE, TantivyTableProviderFactory};
 use self::index_resolver::{MetastoreTantivyResolver, TantivyIndexResolver};
 use self::prepared_split_factory::QuickwitPreparedSplitFactory;
 use self::table_provider::TantivyTableProvider;

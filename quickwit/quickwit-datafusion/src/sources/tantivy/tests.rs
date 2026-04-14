@@ -21,8 +21,8 @@ use std::sync::Arc;
 
 use arrow::array::{Array, Float64Array, Int64Array, RecordBatch};
 use datafusion::prelude::SessionContext;
-use tantivy::schema::{SchemaBuilder, FAST, INDEXED, STORED, STRING, TEXT};
-use tantivy_datafusion::{full_text_udf, SingleTableProvider};
+use tantivy::schema::{FAST, INDEXED, STORED, STRING, SchemaBuilder, TEXT};
+use tantivy_datafusion::{SingleTableProvider, full_text_udf};
 
 /// Create a tantivy index in a temporary directory with the given documents.
 fn build_test_index(docs: &[serde_json::Value]) -> tantivy::Index {
@@ -272,12 +272,7 @@ async fn test_multi_split_query() {
     let index1 = build_test_index(&docs1);
     let index2 = build_test_index(&docs2);
 
-    let opener1: Arc<dyn tantivy_datafusion::IndexOpener> =
-        Arc::new(tantivy_datafusion::DirectIndexOpener::new(index1));
-    let opener2: Arc<dyn tantivy_datafusion::IndexOpener> =
-        Arc::new(tantivy_datafusion::DirectIndexOpener::new(index2));
-
-    let provider = SingleTableProvider::from_splits(vec![opener1, opener2]).unwrap();
+    let provider = SingleTableProvider::from_local_splits(vec![index1, index2]).unwrap();
     let ctx = SessionContext::new();
     ctx.register_udf(full_text_udf());
     ctx.register_table("logs", Arc::new(provider)).unwrap();

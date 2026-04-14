@@ -108,7 +108,9 @@ impl CompressionPredicate {
 
 impl Predicate for CompressionPredicate {
     fn should_compress<B>(&self, response: &http::Response<B>) -> bool
-    where B: http_body::Body {
+    where
+        B: http_body::Body,
+    {
         if let Some(size_above) = self.size_above_opt {
             size_above.should_compress(response)
         } else {
@@ -480,9 +482,7 @@ fn sql_query_handler(
                     .map(|a| a.contains("application/json"))
                     .unwrap_or(false);
 
-                let (body, content_type, status) = match service
-                    .execute_sql_collected(query)
-                    .await
+                let (body, content_type, status) = match service.execute_sql_collected(query).await
                 {
                     Ok(batches) => {
                         if want_json {
@@ -495,7 +495,9 @@ fn sql_query_handler(
                             )
                         } else {
                             (
-                                crate::datafusion_api::rest_handler::batches_to_pretty_string(&batches),
+                                crate::datafusion_api::rest_handler::batches_to_pretty_string(
+                                    &batches,
+                                ),
                                 "text/plain; charset=utf-8",
                                 warp::http::StatusCode::OK,
                             )
