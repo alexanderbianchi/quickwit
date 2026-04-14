@@ -65,14 +65,20 @@ pub struct QuickwitPreparedSplitFactory {
     searcher_context: Arc<SearcherContext>,
     storage_resolver: StorageResolver,
     prepared_splits: PreparedSplitCache,
+    rayon_pool: Arc<rayon::ThreadPool>,
 }
 
 impl QuickwitPreparedSplitFactory {
-    pub fn new(searcher_context: Arc<SearcherContext>, storage_resolver: StorageResolver) -> Self {
+    pub fn new(
+        searcher_context: Arc<SearcherContext>,
+        storage_resolver: StorageResolver,
+        rayon_pool: Arc<rayon::ThreadPool>,
+    ) -> Self {
         Self {
             searcher_context,
             storage_resolver,
             prepared_splits: Arc::new(Mutex::new(HashMap::new())),
+            rayon_pool,
         }
     }
 }
@@ -94,6 +100,7 @@ impl SplitRuntimeFactory for QuickwitPreparedSplitFactory {
             )
         };
 
+        let rayon_pool = Arc::clone(&self.rayon_pool);
         cell.get_or_try_init(|| async {
             let index_uri = Uri::from_str(&payload.index_uri).map_err(|e| {
                 DataFusionError::Internal(format!("parse index URI '{}': {e}", payload.index_uri))
@@ -106,7 +113,7 @@ impl SplitRuntimeFactory for QuickwitPreparedSplitFactory {
             let ephemeral_cache = ByteRangeCache::with_infinite_capacity(
                 &quickwit_storage::STORAGE_METRICS.shortlived_cache,
             );
-            let (index, hot_directory) = quickwit_search::leaf::open_index_with_caches(
+            let (mut index, hot_directory) = quickwit_search::leaf::open_index_with_caches(
                 &self.searcher_context,
                 storage,
                 &payload.split_footer(),
@@ -115,6 +122,9 @@ impl SplitRuntimeFactory for QuickwitPreparedSplitFactory {
             )
             .await
             .map_err(|e| DataFusionError::Internal(format!("open split with caches: {e}")))?;
+            // Set the tantivy executor to the same bounded Rayon pool used for
+            // DataFusion sync work, matching Quickwit's search runtime model.
+            index.set_executor(tantivy::Executor::from(rayon_pool));
             let prepared = PreparedSplit::new(index, Arc::new(hot_directory))?;
             Ok::<Arc<PreparedSplit>, DataFusionError>(Arc::new(prepared))
         })

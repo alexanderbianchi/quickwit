@@ -26,6 +26,8 @@ tonic = { workspace = true }
 tracing = { workspace = true }
 url = "2"
 
+rayon = { workspace = true }
+
 quickwit-common = { workspace = true }
 quickwit-config = { workspace = true }
 quickwit-df-core = { workspace = true, features = ["grpc"] }

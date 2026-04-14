@@ -25,6 +25,7 @@
 pub(crate) mod factory;
 pub(crate) mod index_resolver;
 pub(crate) mod prepared_split_factory;
+pub(crate) mod sync_pool;
 pub(crate) mod table_provider;
 
 #[cfg(test)]
@@ -43,7 +44,7 @@ use quickwit_common::is_metrics_index;
 use quickwit_proto::metastore::{MetastoreError, MetastoreServiceClient};
 use quickwit_search::SearcherContext;
 use quickwit_storage::StorageResolver;
-use tantivy_datafusion::{SplitRuntimeFactoryExt, TantivyCodec};
+use tantivy_datafusion::{SplitRuntimeFactoryExt, SyncExecutionPoolExt, SyncExecutionPoolRef, TantivyCodec};
 
 use self::factory::{TANTIVY_FILE_TYPE, TantivyTableProviderFactory};
 use self::index_resolver::{MetastoreTantivyResolver, TantivyIndexResolver};
@@ -68,6 +69,8 @@ pub struct TantivyDataSource {
     metastore: MetastoreServiceClient,
     searcher_context: Arc<SearcherContext>,
     storage_resolver: StorageResolver,
+    sync_pool: SyncExecutionPoolRef,
+    rayon_pool: Arc<rayon::ThreadPool>,
 }
 
 impl TantivyDataSource {
@@ -77,11 +80,17 @@ impl TantivyDataSource {
         searcher_context: Arc<SearcherContext>,
     ) -> Self {
         let resolver = MetastoreTantivyResolver::new(metastore.clone());
+        let pool = sync_pool::RayonSyncExecutionPool::new(
+            quickwit_common::thread_pool::ThreadPool::new("df-tantivy-search", None),
+        );
+        let rayon_pool = pool.rayon_pool();
         Self {
             index_resolver: Arc::new(resolver),
             metastore,
             searcher_context,
             storage_resolver,
+            sync_pool: Arc::new(pool),
+            rayon_pool,
         }
     }
 
@@ -116,7 +125,9 @@ impl QuickwitDataSource for TantivyDataSource {
         config.set_split_runtime_factory(Arc::new(QuickwitPreparedSplitFactory::new(
             Arc::clone(&self.searcher_context),
             self.storage_resolver.clone(),
+            Arc::clone(&self.rayon_pool),
         )));
+        config.set_sync_execution_pool(Arc::clone(&self.sync_pool));
     }
 
     fn contributions(&self) -> DataSourceContributions {
