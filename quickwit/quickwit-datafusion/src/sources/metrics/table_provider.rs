@@ -36,6 +36,7 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion_datasource::PartitionedFile;
 use datafusion_datasource::file_groups::FileGroup;
 use datafusion_datasource::file_scan_config::FileScanConfigBuilder;
+use datafusion_datasource_parquet::CachedParquetFileReaderFactory;
 use datafusion_datasource_parquet::source::ParquetSource;
 use datafusion_physical_plan::expressions::Column;
 use quickwit_common::uri::Uri;
@@ -164,7 +165,7 @@ impl TableProvider for MetricsTableProvider {
 
     async fn scan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
@@ -200,11 +201,20 @@ impl TableProvider for MetricsTableProvider {
 
         // Configure ParquetSource with bloom filters + pushdown enabled
         let table_schema: datafusion_datasource::TableSchema = self.schema.clone().into();
+        let metadata_cache = state.runtime_env().cache_manager.get_file_metadata_cache();
+        let object_store = state
+            .runtime_env()
+            .object_store(self.object_store_url.clone())?;
+        let reader_factory = Arc::new(CachedParquetFileReaderFactory::new(
+            object_store,
+            metadata_cache,
+        ));
         let parquet_source = ParquetSource::new(table_schema)
             .with_bloom_filter_on_read(true)
             .with_pushdown_filters(true)
             .with_reorder_filters(true)
-            .with_enable_page_index(true);
+            .with_enable_page_index(true)
+            .with_parquet_file_reader_factory(reader_factory);
 
         // Build the FileScanConfig
         let mut builder =
@@ -348,7 +358,10 @@ fn splits_have_default_metrics_sort(splits: &[ParquetSplitMetadata]) -> bool {
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::prelude::SessionContext;
     use quickwit_parquet_engine::split::TimeRange;
+
+    use crate::sources::metrics::test_utils::TestSplitProvider;
 
     use super::*;
 
@@ -388,6 +401,31 @@ mod tests {
             .time_range(TimeRange::new(0, 1))
             .sort_fields(sort_fields)
             .build()
+    }
+
+    #[tokio::test]
+    async fn scan_installs_cached_parquet_reader_factory() {
+        let schema = schema_with_columns(&["metric_name", "timestamp_secs", "value"]);
+        let split_provider = Arc::new(TestSplitProvider::new(Vec::new()));
+        let provider =
+            MetricsTableProvider::new(schema, split_provider, Uri::for_test("file:///metrics"))
+                .unwrap();
+        let ctx = SessionContext::new();
+        let state = ctx.state();
+
+        let plan = provider.scan(&state, None, &[], None).await.unwrap();
+        let data_source_exec = plan
+            .as_any()
+            .downcast_ref::<DataSourceExec>()
+            .expect("metrics scan should produce DataSourceExec");
+        let (_file_scan, parquet_source) = data_source_exec
+            .downcast_to_file_source::<ParquetSource>()
+            .expect("metrics scan should use ParquetSource");
+
+        assert!(
+            parquet_source.parquet_file_reader_factory().is_some(),
+            "metrics scans should use DataFusion's metadata-caching parquet reader"
+        );
     }
 
     #[test]
