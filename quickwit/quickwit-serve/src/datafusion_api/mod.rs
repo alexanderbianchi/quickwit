@@ -19,4 +19,5 @@
 //! `lib.rs` and `grpc.rs` each have a single `#[cfg(feature = "datafusion")]`
 //! call site into this module.
 
+pub(crate) mod rest_handler;
 pub(crate) mod setup;

@@ -48,6 +48,7 @@ use datafusion_distributed::{
     DistributedExt, DistributedPhysicalOptimizerRule, TaskEstimator, WorkerResolver,
 };
 
+use crate::config::QuickwitConfig;
 use crate::data_source::{
     QuickwitRuntimePlugin, QuickwitRuntimeRegistration, QuickwitSubstraitConsumerExt,
 };
@@ -307,6 +308,10 @@ impl DataFusionSessionBuilder {
             .options_mut()
             .catalog
             .create_default_catalog_and_schema = false;
+        config
+            .options_mut()
+            .extensions
+            .insert(QuickwitConfig::default());
         registration.apply_to_config(&mut config);
 
         for (key, value) in properties {
@@ -485,5 +490,29 @@ mod tests {
                 .batch_size,
             1024
         );
+    }
+
+    #[test]
+    fn quickwit_request_properties_are_registered() {
+        let builder = DataFusionSessionBuilder::new();
+        let properties = HashMap::from([
+            (
+                "quickwit.event_substrait_index".to_string(),
+                "quiver-demo-logs".to_string(),
+            ),
+            ("quickwit.explain_analyze".to_string(), "true".to_string()),
+        ]);
+
+        let ctx = builder.build_session_with_properties(&properties).unwrap();
+        let state = ctx.state();
+        let quickwit_config = state
+            .config()
+            .options()
+            .extensions
+            .get::<QuickwitConfig>()
+            .unwrap();
+
+        assert_eq!(quickwit_config.event_substrait_index, "quiver-demo-logs");
+        assert!(quickwit_config.explain_analyze);
     }
 }

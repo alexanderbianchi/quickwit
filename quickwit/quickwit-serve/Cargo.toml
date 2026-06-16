@@ -56,6 +56,8 @@ utoipa = { workspace = true }
 warp = { workspace = true, features = ["server"] }
 zstd = { workspace = true }
 
+arrow = { workspace = true, optional = true }
+
 quickwit-actors = { workspace = true }
 quickwit-cluster = { workspace = true }
 quickwit-common = { workspace = true }
@@ -111,7 +113,7 @@ quickwit-search = { workspace = true, features = ["testsuite"] }
 quickwit-storage = { workspace = true, features = ["testsuite"] }
 
 [features]
-datafusion = ["dep:quickwit-datafusion"]
+datafusion = ["dep:arrow", "dep:quickwit-datafusion"]
 pprof = [
   "dep:pprof"
 ]

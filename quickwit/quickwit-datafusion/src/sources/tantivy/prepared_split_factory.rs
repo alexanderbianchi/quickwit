@@ -111,7 +111,7 @@ impl SplitRuntimeFactory for QuickwitPreparedSplitFactory {
                 .await
                 .map_err(|e| DataFusionError::Internal(format!("resolve split storage: {e}")))?;
             let ephemeral_cache = ByteRangeCache::with_infinite_capacity(
-                &quickwit_storage::STORAGE_METRICS.shortlived_cache,
+                &quickwit_storage::metrics::SHORTLIVED_CACHE,
             );
             let (mut index, hot_directory) = quickwit_search::leaf::open_index_with_caches(
                 &self.searcher_context,

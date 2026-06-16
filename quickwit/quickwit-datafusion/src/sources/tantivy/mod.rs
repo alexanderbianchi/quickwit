@@ -31,26 +31,31 @@ pub(crate) mod table_provider;
 #[cfg(test)]
 mod tests;
 
+use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use datafusion::catalog::TableProviderFactory;
+use datafusion::arrow;
+use datafusion::catalog::{MemorySchemaProvider, SchemaProvider, TableProviderFactory};
 use datafusion::datasource::TableProvider;
 use datafusion::error::Result as DFResult;
-use datafusion::execution::SessionState;
-use datafusion::prelude::SessionConfig;
 use datafusion_substrait::substrait::proto::read_rel::ReadType;
 use quickwit_common::is_metrics_index;
+use quickwit_df_core::{
+    QuickwitRuntimePlugin, QuickwitRuntimeRegistration, QuickwitSubstraitConsumerExt,
+};
 use quickwit_proto::metastore::{MetastoreError, MetastoreServiceClient};
 use quickwit_search::SearcherContext;
 use quickwit_storage::StorageResolver;
-use tantivy_datafusion::{SplitRuntimeFactoryExt, SyncExecutionPoolExt, SyncExecutionPoolRef, TantivyCodec};
+use tantivy_datafusion::{
+    SplitRuntimeFactory, SplitRuntimeFactoryExt, SyncExecutionPoolExt, SyncExecutionPoolRef,
+    TantivyCodec,
+};
 
 use self::factory::{TANTIVY_FILE_TYPE, TantivyTableProviderFactory};
 use self::index_resolver::{MetastoreTantivyResolver, TantivyIndexResolver};
 use self::prepared_split_factory::QuickwitPreparedSplitFactory;
 use self::table_provider::TantivyTableProvider;
-use crate::data_source::{DataSourceContributions, QuickwitDataSource};
 
 fn is_index_not_found(err: &datafusion::error::DataFusionError) -> bool {
     match err {
@@ -62,7 +67,31 @@ fn is_index_not_found(err: &datafusion::error::DataFusionError) -> bool {
     }
 }
 
-/// `QuickwitDataSource` implementation for tantivy/logs indexes.
+async fn resolve_tantivy_index(
+    index_resolver: &dyn TantivyIndexResolver,
+    index_name: &str,
+) -> DFResult<Option<self::index_resolver::ResolvedIndex>> {
+    if is_metrics_index(index_name) {
+        tracing::debug!(
+            index_name,
+            "metrics index belongs to parquet source, skipping tantivy"
+        );
+        return Ok(None);
+    }
+
+    match index_resolver.resolve(index_name).await {
+        Ok(resolved) => Ok(Some(resolved)),
+        Err(err) => {
+            if is_index_not_found(&err) {
+                Ok(None)
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
+/// Runtime/Substrait integration for tantivy/logs indexes.
 #[derive(Debug)]
 pub struct TantivyDataSource {
     index_resolver: Arc<dyn TantivyIndexResolver>,
@@ -94,60 +123,50 @@ impl TantivyDataSource {
         }
     }
 
-    async fn resolve_index(
-        &self,
-        index_name: &str,
-    ) -> DFResult<Option<self::index_resolver::ResolvedIndex>> {
-        if is_metrics_index(index_name) {
-            tracing::debug!(
-                index_name,
-                "metrics index belongs to parquet source, skipping tantivy"
-            );
-            return Ok(None);
-        }
-
-        match self.index_resolver.resolve(index_name).await {
-            Ok(resolved) => Ok(Some(resolved)),
-            Err(err) => {
-                if is_index_not_found(&err) {
-                    Ok(None)
-                } else {
-                    Err(err)
-                }
-            }
-        }
+    pub fn schema_provider(&self) -> Arc<dyn SchemaProvider> {
+        Arc::new(TantivySchemaProvider::new(
+            Arc::clone(&self.index_resolver),
+            self.metastore.clone(),
+        ))
     }
 }
 
 #[async_trait]
-impl QuickwitDataSource for TantivyDataSource {
-    fn configure_session(&self, config: &mut SessionConfig) {
-        config.set_split_runtime_factory(Arc::new(QuickwitPreparedSplitFactory::new(
-            Arc::clone(&self.searcher_context),
-            self.storage_resolver.clone(),
-            Arc::clone(&self.rayon_pool),
-        )));
-        config.set_sync_execution_pool(Arc::clone(&self.sync_pool));
-    }
-
-    fn contributions(&self) -> DataSourceContributions {
-        DataSourceContributions::default()
-            .with_udf(Arc::new(tantivy_datafusion::full_text_udf()))
-            .with_physical_optimizer_rule(Arc::new(tantivy_datafusion::AggPushdown::new()))
-            .with_codec_applier(|builder| {
-                use datafusion_distributed::DistributedExt;
-                builder.with_distributed_user_codec(TantivyCodec)
-            })
-    }
-
-    fn ddl_registration(&self) -> Option<(String, Arc<dyn TableProviderFactory>)> {
+impl QuickwitRuntimePlugin for TantivyDataSource {
+    fn registration(&self) -> QuickwitRuntimeRegistration {
+        let split_runtime_factory: Arc<dyn SplitRuntimeFactory> =
+            Arc::new(QuickwitPreparedSplitFactory::new(
+                Arc::clone(&self.searcher_context),
+                self.storage_resolver.clone(),
+                Arc::clone(&self.rayon_pool),
+            ));
+        let sync_pool = Arc::clone(&self.sync_pool);
         let factory: Arc<dyn TableProviderFactory> = Arc::new(TantivyTableProviderFactory::new(
             Arc::clone(&self.index_resolver),
             self.metastore.clone(),
         ));
-        Some((TANTIVY_FILE_TYPE.to_string(), factory))
+
+        QuickwitRuntimeRegistration::default()
+            .with_session_config_setter(move |config| {
+                config.set_split_runtime_factory(Arc::clone(&split_runtime_factory));
+                config.set_sync_execution_pool(Arc::clone(&sync_pool));
+            })
+            .with_udf(Arc::new(tantivy_datafusion::full_text_udf()))
+            .with_physical_optimizer_rule(Arc::new(tantivy_datafusion::AggPushdown::new()))
+            .with_distributed_user_codec(Arc::new(TantivyCodec))
+            .with_table_factory(TANTIVY_FILE_TYPE, factory)
     }
 
+    async fn register_for_worker(
+        &self,
+        _state: &datafusion::execution::SessionState,
+    ) -> DFResult<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl QuickwitSubstraitConsumerExt for TantivyDataSource {
     async fn try_consume_read_rel(
         &self,
         rel: &datafusion_substrait::substrait::proto::ReadRel,
@@ -160,7 +179,9 @@ impl QuickwitDataSource for TantivyDataSource {
             return Ok(None);
         };
 
-        let Some(resolved) = self.resolve_index(index_name).await? else {
+        let Some(resolved) =
+            resolve_tantivy_index(self.index_resolver.as_ref(), index_name).await?
+        else {
             return Ok(None);
         };
 
@@ -174,26 +195,84 @@ impl QuickwitDataSource for TantivyDataSource {
         );
         Ok(Some((index_name.to_string(), Arc::new(provider))))
     }
+}
 
-    /// Auto-resolve path: derives schema from index metadata and doc-mapper state.
-    /// Returns Ok(None) only when the index is absent or belongs to the metrics source.
-    async fn create_default_table_provider(
-        &self,
-        index_name: &str,
-    ) -> DFResult<Option<Arc<dyn TableProvider>>> {
-        let Some(resolved) = self.resolve_index(index_name).await? else {
+/// Native OSS `SchemaProvider` for tantivy/log indexes.
+pub struct TantivySchemaProvider {
+    index_resolver: Arc<dyn TantivyIndexResolver>,
+    metastore: MetastoreServiceClient,
+    ddl_tables: MemorySchemaProvider,
+}
+
+impl TantivySchemaProvider {
+    pub fn new(
+        index_resolver: Arc<dyn TantivyIndexResolver>,
+        metastore: MetastoreServiceClient,
+    ) -> Self {
+        Self {
+            index_resolver,
+            metastore,
+            ddl_tables: MemorySchemaProvider::new(),
+        }
+    }
+}
+
+impl std::fmt::Debug for TantivySchemaProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TantivySchemaProvider")
+            .field("num_ddl_tables", &self.ddl_tables.table_names().len())
+            .finish()
+    }
+}
+
+#[async_trait]
+impl SchemaProvider for TantivySchemaProvider {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn table_names(&self) -> Vec<String> {
+        let resolver = Arc::clone(&self.index_resolver);
+        let mut names = self.ddl_tables.table_names();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                if let Ok(mut resolved_names) = resolver.list_index_names().await {
+                    resolved_names.retain(|index_name| !is_metrics_index(index_name));
+                    names.append(&mut resolved_names);
+                }
+            })
+        });
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    async fn table(&self, name: &str) -> DFResult<Option<Arc<dyn TableProvider>>> {
+        if let Some(provider) = self.ddl_tables.table(name).await? {
+            return Ok(Some(provider));
+        }
+
+        let Some(resolved) = resolve_tantivy_index(self.index_resolver.as_ref(), name).await?
+        else {
             return Ok(None);
         };
         let provider = TantivyTableProvider::try_from_index(self.metastore.clone(), resolved);
-
         Ok(Some(Arc::new(provider)))
     }
 
-    async fn register_for_worker(&self, _state: &SessionState) -> DFResult<()> {
-        Ok(())
+    fn table_exist(&self, name: &str) -> bool {
+        self.ddl_tables.table_exist(name)
     }
 
-    async fn list_index_names(&self) -> DFResult<Vec<String>> {
-        self.index_resolver.list_index_names().await
+    fn register_table(
+        &self,
+        name: String,
+        table: Arc<dyn TableProvider>,
+    ) -> DFResult<Option<Arc<dyn TableProvider>>> {
+        self.ddl_tables.register_table(name, table)
+    }
+
+    fn deregister_table(&self, name: &str) -> DFResult<Option<Arc<dyn TableProvider>>> {
+        self.ddl_tables.deregister_table(name)
     }
 }

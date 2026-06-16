@@ -8657,9 +8657,13 @@ dependencies = [
  "quickwit-proto",
  "quickwit-search",
  "quickwit-storage",
+ "rayon",
  "regex",
  "regex-automata",
+ "serde",
  "serde_json",
+ "tantivy",
+ "tantivy-datafusion",
  "tempfile",
  "tokio",
  "tonic 0.14.6",
@@ -8687,6 +8691,7 @@ dependencies = [
  "async-trait",
  "datafusion",
  "datafusion-distributed",
+ "datafusion-proto",
  "datafusion-substrait",
  "futures",
  "object_store",
@@ -9323,6 +9328,7 @@ name = "quickwit-serve"
 version = "0.8.0"
 dependencies = [
  "anyhow",
+ "arrow",
  "assert-json-diff",
  "async-trait",
  "base64 0.22.1",
@@ -10270,6 +10276,16 @@ checksum = "796e8d2b6696392a43bea58116b667fb4c29727dc5abd27d6acf338bb4f688c7"
 dependencies = [
  "cfg-if",
  "ordered-multimap",
+]
+
+[[package]]
+name = "rust-stemmers"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e46a2036019fdb888131db7a4c847a1063a7493f971ed94ea82c67eada63ca54"
+dependencies = [
+ "serde",
+ "serde_derive",
 ]
 
 [[package]]
@@ -11825,6 +11841,7 @@ dependencies = [
  "oneshot 0.1.13",
  "rayon",
  "regex",
+ "rust-stemmers",
  "rustc-hash",
  "serde",
  "serde_json",
@@ -11880,6 +11897,29 @@ dependencies = [
  "ownedbytes",
  "serde",
  "time",
+]
+
+[[package]]
+name = "tantivy-datafusion"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "base64 0.22.1",
+ "datafusion",
+ "datafusion-datasource",
+ "datafusion-expr-common",
+ "datafusion-physical-expr",
+ "datafusion-physical-optimizer",
+ "datafusion-physical-plan",
+ "datafusion-proto",
+ "futures",
+ "prost 0.14.3",
+ "serde",
+ "serde_json",
+ "tantivy",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

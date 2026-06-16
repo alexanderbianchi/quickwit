@@ -26,8 +26,10 @@ use datafusion::physical_plan::common::collect as collect_stream;
 use datafusion_substrait::logical_plan::producer::to_substrait_plan;
 use prost::Message;
 use quickwit_config::service::QuickwitService;
-use quickwit_datafusion::DataFusionSessionBuilder;
 use quickwit_datafusion::sources::tantivy::TantivyDataSource;
+use quickwit_datafusion::{
+    DataFusionSessionBuilder, QuickwitSchemaProvider, QuickwitWorkerResolver,
+};
 use quickwit_metastore::SplitState;
 use quickwit_proto::metastore::MetastoreServiceClient;
 use quickwit_rest_client::rest_client::CommitType;
@@ -70,7 +72,15 @@ fn session_builder(
         sandbox.storage_resolver().clone(),
         searcher_context,
     ));
-    DataFusionSessionBuilder::new().with_source(source)
+    let schema_source = Arc::clone(&source);
+    DataFusionSessionBuilder::new()
+        .with_runtime_plugin(Arc::clone(&source) as Arc<_>)
+        .with_substrait_consumer(source as Arc<_>)
+        .with_schema_provider_factory("quickwit", "public", move || {
+            Arc::new(QuickwitSchemaProvider::new(vec![
+                schema_source.schema_provider(),
+            ]))
+        })
 }
 
 fn distributed_session_builder(
@@ -84,6 +94,7 @@ fn distributed_session_builder(
         sandbox.storage_resolver().clone(),
         searcher_context,
     ));
+    let schema_source = Arc::clone(&source);
 
     let pool = SearcherPool::default();
     for (config, services) in &sandbox.node_configs {
@@ -97,8 +108,14 @@ fn distributed_session_builder(
     }
 
     DataFusionSessionBuilder::new()
-        .with_source(source)
-        .with_searcher_pool(pool)
+        .with_runtime_plugin(Arc::clone(&source) as Arc<_>)
+        .with_substrait_consumer(source as Arc<_>)
+        .with_schema_provider_factory("quickwit", "public", move || {
+            Arc::new(QuickwitSchemaProvider::new(vec![
+                schema_source.schema_provider(),
+            ]))
+        })
+        .with_worker_resolver(QuickwitWorkerResolver::new(pool))
 }
 
 async fn run_sql(builder: &DataFusionSessionBuilder, sql: &str) -> Vec<RecordBatch> {

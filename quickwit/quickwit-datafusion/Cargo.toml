@@ -26,12 +26,9 @@ tonic = { workspace = true }
 tracing = { workspace = true }
 url = "2"
 
-rayon = { workspace = true }
-
 quickwit-common = { workspace = true }
 quickwit-config = { workspace = true }
 quickwit-df-core = { workspace = true, features = ["grpc"] }
-quickwit-directories = { workspace = true }
 quickwit-metastore = { workspace = true }
 quickwit-parquet-engine = { workspace = true }
 quickwit-proto = { workspace = true }

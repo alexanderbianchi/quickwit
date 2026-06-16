@@ -390,134 +390,63 @@ fn api_v1_routes(
     quickwit_services: Arc<QuickwitServices>,
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = Rejection> + Clone {
     let api_v1_root_url = warp::path!("api" / "v1" / ..);
-    api_v1_root_url.and(
-        elastic_api_handlers(
-            quickwit_services.cluster.clone(),
-            quickwit_services.node_config.clone(),
-            quickwit_services.search_service.clone(),
-            quickwit_services.ingest_service.clone(),
-            quickwit_services.ingest_router_service.clone(),
-            quickwit_services.metastore_client.clone(),
-            quickwit_services.index_manager.clone(),
-            !disable_ingest_v1(),
-            enable_ingest_v2(),
-        )
-        .or(cluster_handler(quickwit_services.cluster.clone()))
-        .boxed()
-        .or(node_info_handler(
-            BuildInfo::get(),
-            RuntimeInfo::get(),
-            quickwit_services.node_config.clone(),
-        ))
-        .boxed()
-        .or(indexing_get_handler(
-            quickwit_services.indexing_service_opt.clone(),
-        ))
-        .boxed()
-        .or(search_routes(quickwit_services.search_service.clone()))
-        .boxed()
-        .or(ingest_api_handlers(
-            quickwit_services.ingest_router_service.clone(),
-            quickwit_services.ingest_service.clone(),
-            quickwit_services.node_config.ingest_api_config.clone(),
-            !disable_ingest_v1(),
-            enable_ingest_v2(),
-        ))
-        .boxed()
-        .or(otlp_ingest_api_handlers(
-            quickwit_services.otlp_logs_service_opt.clone(),
-            quickwit_services.otlp_traces_service_opt.clone(),
-        ))
-        .boxed()
-        .or(index_management_handlers(
-            quickwit_services.index_manager.clone(),
-            quickwit_services.node_config.clone(),
-        ))
-        .boxed()
-        .or(delete_task_api_handlers(
-            quickwit_services.metastore_client.clone(),
-        ))
-        .boxed()
-        .or(jaeger_api_handlers(
-            quickwit_services.jaeger_service_opt.clone(),
-        ))
-        .boxed()
-        .or(index_template_api_handlers(
-            quickwit_services.metastore_client.clone(),
-        ))
-        .boxed()
-        .or(sql_query_handler(
-            quickwit_services.datafusion_session_builder.clone(),
-        ))
-        .boxed(),
+    let routes = elastic_api_handlers(
+        quickwit_services.cluster.clone(),
+        quickwit_services.node_config.clone(),
+        quickwit_services.search_service.clone(),
+        quickwit_services.ingest_service.clone(),
+        quickwit_services.ingest_router_service.clone(),
+        quickwit_services.metastore_client.clone(),
+        quickwit_services.index_manager.clone(),
+        !disable_ingest_v1(),
+        enable_ingest_v2(),
     )
-}
+    .or(cluster_handler(quickwit_services.cluster.clone()))
+    .boxed()
+    .or(node_info_handler(
+        BuildInfo::get(),
+        RuntimeInfo::get(),
+        quickwit_services.node_config.clone(),
+    ))
+    .boxed()
+    .or(indexing_get_handler(
+        quickwit_services.indexing_service_opt.clone(),
+    ))
+    .boxed()
+    .or(search_routes(quickwit_services.search_service.clone()))
+    .boxed()
+    .or(ingest_api_handlers(
+        quickwit_services.ingest_router_service.clone(),
+        quickwit_services.ingest_service.clone(),
+        quickwit_services.node_config.ingest_api_config.clone(),
+        !disable_ingest_v1(),
+        enable_ingest_v2(),
+    ))
+    .boxed()
+    .or(otlp_ingest_api_handlers(
+        quickwit_services.otlp_logs_service_opt.clone(),
+        quickwit_services.otlp_traces_service_opt.clone(),
+    ))
+    .boxed()
+    .or(index_management_handlers(
+        quickwit_services.index_manager.clone(),
+        quickwit_services.node_config.clone(),
+    ))
+    .boxed()
+    .or(delete_task_api_handlers(
+        quickwit_services.metastore_client.clone(),
+    ))
+    .boxed()
+    .or(jaeger_api_handlers(
+        quickwit_services.jaeger_service_opt.clone(),
+    ))
+    .boxed()
+    .or(index_template_api_handlers(
+        quickwit_services.metastore_client.clone(),
+    ))
+    .boxed();
 
-/// REST handler for `POST _sql` — DataFusion SQL queries.
-///
-/// Returns a warp filter that accepts `{"query": "SELECT ..."}` and returns
-/// JSON rows. When DataFusion is not enabled, the filter rejects (returns 404).
-fn sql_query_handler(
-    session_builder_opt: Option<Arc<quickwit_datafusion::DataFusionSessionBuilder>>,
-) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
-    let service_opt = session_builder_opt
-        .map(|builder| Arc::new(quickwit_datafusion::DataFusionService::new(builder)));
-
-    warp::path!("_sql")
-        .and(warp::post())
-        .and(warp::body::json::<serde_json::Value>())
-        .and(warp::header::optional::<String>("accept"))
-        .and(warp::any().map(move || service_opt.clone()))
-        .and_then(
-            |body: serde_json::Value,
-             accept: Option<String>,
-             service_opt: Option<Arc<quickwit_datafusion::DataFusionService>>| async move {
-                let service = service_opt.ok_or_else(warp::reject::not_found)?;
-                let query = body
-                    .get("query")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(warp::reject::not_found)?;
-                let want_json = accept
-                    .as_deref()
-                    .map(|a| a.contains("application/json"))
-                    .unwrap_or(false);
-
-                let (body, content_type, status) = match service.execute_sql_collected(query).await
-                {
-                    Ok(batches) => {
-                        if want_json {
-                            let response =
-                                crate::datafusion_api::rest_handler::batches_to_json(&batches);
-                            (
-                                serde_json::to_string(&response).unwrap(),
-                                "application/json",
-                                warp::http::StatusCode::OK,
-                            )
-                        } else {
-                            (
-                                crate::datafusion_api::rest_handler::batches_to_pretty_string(
-                                    &batches,
-                                ),
-                                "text/plain; charset=utf-8",
-                                warp::http::StatusCode::OK,
-                            )
-                        }
-                    }
-                    Err(err) => {
-                        tracing::error!(error = %err, "sql query failed");
-                        (
-                            format!("error: {err}\n"),
-                            "text/plain; charset=utf-8",
-                            warp::http::StatusCode::BAD_REQUEST,
-                        )
-                    }
-                };
-                Ok::<_, warp::Rejection>(warp::reply::with_status(
-                    warp::reply::with_header(body, "content-type", content_type),
-                    status,
-                ))
-            },
-        )
+    api_v1_root_url.and(routes)
 }
 
 /// This function returns a formatted error based on the given rejection reason.
