@@ -47,6 +47,7 @@ use datafusion_distributed::{
 use datafusion_substrait::substrait::proto::Plan as SubstraitPlan;
 use futures::StreamExt;
 
+use crate::config::QuickwitConfig;
 use crate::session::DataFusionSessionBuilder;
 
 #[derive(Clone, Copy)]
@@ -443,6 +444,7 @@ impl DataFusionService {
         let ctx = self
             .builder
             .build_session_with_properties(request.properties)?;
+        let output = effective_output(request.output, &ctx);
         let prepared = self.prepare_logical_plan(request.input, &ctx).await?;
         let logical_plan_display = prepared.logical_plan.display_indent().to_string();
 
@@ -456,7 +458,7 @@ impl DataFusionService {
         let stream_creation_start = Instant::now();
         let mut analyze_execution_duration = None;
         let mut analyze_output_rows = None;
-        let stream = match request.output {
+        let stream = match output {
             DataFusionOutput::Records => {
                 execute_stream(Arc::clone(&physical_plan), ctx.task_ctx())?
             }
@@ -483,7 +485,7 @@ impl DataFusionService {
             stream,
             metadata: DataFusionExecutionMetadata {
                 input: prepared.input,
-                output: request.output,
+                output,
                 logical_plan: logical_plan_display,
                 physical_plan,
                 input_decode_duration: prepared.input_decode_duration,
@@ -835,6 +837,23 @@ fn substrait_plan_json(plan: &SubstraitPlan) -> DFResult<String> {
     })
 }
 
+fn effective_output(requested: DataFusionOutput, ctx: &SessionContext) -> DataFusionOutput {
+    if requested != DataFusionOutput::Explain {
+        return requested;
+    }
+
+    let state = ctx.state();
+    let Some(config) = state.config().options().extensions.get::<QuickwitConfig>() else {
+        return requested;
+    };
+
+    if config.explain_analyze {
+        DataFusionOutput::ExplainAnalyze
+    } else {
+        requested
+    }
+}
+
 async fn execute_plan_for_metrics(
     physical_plan: Arc<dyn ExecutionPlan>,
     task_ctx: Arc<datafusion::execution::TaskContext>,
@@ -1055,6 +1074,11 @@ fn duration_as_millis_f64(duration: Duration) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::session::DataFusionSessionBuilder;
+
     #[test]
     fn normalizes_proto_json_any_type_fields_recursively() {
         let mut value = serde_json::json!({
@@ -1089,5 +1113,23 @@ mod tests {
             "type.googleapis.com/example.Canonical"
         );
         assert!(value["alreadyCanonical"].get("@type").is_none());
+    }
+
+    #[test]
+    fn explain_analyze_property_upgrades_explain_only() {
+        let properties =
+            HashMap::from([("quickwit.explain_analyze".to_string(), "true".to_string())]);
+        let ctx = DataFusionSessionBuilder::new()
+            .build_session_with_properties(&properties)
+            .unwrap();
+
+        assert_eq!(
+            effective_output(DataFusionOutput::Explain, &ctx),
+            DataFusionOutput::ExplainAnalyze
+        );
+        assert_eq!(
+            effective_output(DataFusionOutput::Records, &ctx),
+            DataFusionOutput::Records
+        );
     }
 }

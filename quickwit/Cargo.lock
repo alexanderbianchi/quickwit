@@ -8902,10 +8902,12 @@ dependencies = [
  "aws-sdk-sqs",
  "bytesize",
  "datafusion",
+ "datafusion-substrait",
  "futures-util",
  "hyper 1.9.0",
  "hyper-util",
  "itertools 0.14.0",
+ "prost 0.14.3",
  "quickwit-actors",
  "quickwit-cli",
  "quickwit-common",
@@ -9328,7 +9330,6 @@ name = "quickwit-serve"
 version = "0.8.0"
 dependencies = [
  "anyhow",
- "arrow",
  "assert-json-diff",
  "async-trait",
  "base64 0.22.1",

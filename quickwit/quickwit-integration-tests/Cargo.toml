@@ -29,6 +29,8 @@ datafusion = [
     "dep:arrow",
     "dep:bytesize",
     "dep:datafusion",
+    "dep:datafusion-substrait",
+    "dep:prost",
     "dep:quickwit-datafusion",
     "dep:quickwit-parquet-engine",
     # Turn on the server-side DataFusion gRPC wiring inside the ClusterSandbox
@@ -43,6 +45,8 @@ datafusion = [
 arrow = { workspace = true, optional = true }
 bytesize = { workspace = true, optional = true }
 datafusion = { version = "53", optional = true }
+datafusion-substrait = { version = "53", optional = true }
+prost = { workspace = true, optional = true }
 quickwit-datafusion = { workspace = true, features = ["testsuite"], optional = true }
 quickwit-parquet-engine = { workspace = true, optional = true }
 

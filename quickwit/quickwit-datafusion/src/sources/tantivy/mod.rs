@@ -192,6 +192,7 @@ impl QuickwitSubstraitConsumerExt for TantivyDataSource {
             resolved.index_uid,
             resolved.index_uri,
             resolved.tantivy_schema,
+            resolved.timestamp_field,
         );
         Ok(Some((index_name.to_string(), Arc::new(provider))))
     }
@@ -232,19 +233,7 @@ impl SchemaProvider for TantivySchemaProvider {
     }
 
     fn table_names(&self) -> Vec<String> {
-        let resolver = Arc::clone(&self.index_resolver);
-        let mut names = self.ddl_tables.table_names();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                if let Ok(mut resolved_names) = resolver.list_index_names().await {
-                    resolved_names.retain(|index_name| !is_metrics_index(index_name));
-                    names.append(&mut resolved_names);
-                }
-            })
-        });
-        names.sort();
-        names.dedup();
-        names
+        self.ddl_tables.table_names()
     }
 
     async fn table(&self, name: &str) -> DFResult<Option<Arc<dyn TableProvider>>> {

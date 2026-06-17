@@ -434,6 +434,10 @@ impl ClusterSandbox {
         .build()
     }
 
+    pub fn storage_resolver(&self) -> &StorageResolver {
+        &self.storage_resolver
+    }
+
     // TODO(#5604)
     pub fn rest_client_legacy_indexer(&self) -> QuickwitClient {
         let node_config = self.find_node_for_service(QuickwitService::Indexer);

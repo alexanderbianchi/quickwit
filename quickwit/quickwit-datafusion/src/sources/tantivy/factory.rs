@@ -84,6 +84,7 @@ impl TableProviderFactory for TantivyTableProviderFactory {
             resolved.index_uid,
             resolved.index_uri,
             resolved.tantivy_schema,
+            resolved.timestamp_field,
         );
 
         Ok(Arc::new(provider))

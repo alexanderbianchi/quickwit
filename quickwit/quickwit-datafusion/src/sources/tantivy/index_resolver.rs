@@ -37,6 +37,7 @@ pub struct ResolvedIndex {
     pub index_uri: Uri,
     pub schema: Arc<arrow::datatypes::Schema>,
     pub tantivy_schema: tantivy::schema::Schema,
+    pub timestamp_field: Option<String>,
 }
 
 fn build_catalog_schema(tantivy_schema: &tantivy::schema::Schema) -> Arc<Schema> {
@@ -104,6 +105,7 @@ impl TantivyIndexResolver for MetastoreTantivyResolver {
         let index_uid = index_metadata.index_uid.clone();
         let index_uri = index_metadata.index_config.index_uri.clone();
         let tantivy_schema = doc_mapper.schema().clone();
+        let timestamp_field = doc_mapper.timestamp_field_name().map(str::to_owned);
         let schema = build_catalog_schema(&tantivy_schema);
 
         debug!(%index_uid, %index_uri, "resolved tantivy index metadata");
@@ -113,6 +115,7 @@ impl TantivyIndexResolver for MetastoreTantivyResolver {
             index_uri,
             schema,
             tantivy_schema,
+            timestamp_field,
         })
     }
 

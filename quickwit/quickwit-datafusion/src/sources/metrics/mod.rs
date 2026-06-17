@@ -196,19 +196,7 @@ impl SchemaProvider for MetricsSchemaProvider {
     }
 
     fn table_names(&self) -> Vec<String> {
-        let resolver = Arc::clone(&self.index_resolver);
-        let mut names = self.ddl_tables.table_names();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                if let Ok(mut resolved_names) = resolver.list_index_names().await {
-                    resolved_names.retain(|id| is_parquet_pipeline_index(id));
-                    names.append(&mut resolved_names);
-                }
-            })
-        });
-        names.sort();
-        names.dedup();
-        names
+        self.ddl_tables.table_names()
     }
 
     async fn table(&self, name: &str) -> DFResult<Option<Arc<dyn TableProvider>>> {

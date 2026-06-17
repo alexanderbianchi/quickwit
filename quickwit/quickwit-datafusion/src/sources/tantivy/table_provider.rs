@@ -25,8 +25,9 @@ use async_trait::async_trait;
 use datafusion::catalog::Session;
 use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result as DFResult};
-use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
+use datafusion::logical_expr::{BinaryExpr, Expr, Operator, TableProviderFilterPushDown};
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::scalar::ScalarValue;
 use quickwit_common::uri::Uri;
 use quickwit_metastore::{
     ListSplitsQuery, ListSplitsRequestExt, MetastoreServiceStreamSplitsExt, SplitMetadata,
@@ -46,6 +47,7 @@ pub struct TantivyTableProvider {
     index_uid: IndexUid,
     index_uri: Uri,
     tantivy_schema: tantivy::schema::Schema,
+    timestamp_field: Option<String>,
     multi_valued_fields: Vec<String>,
 }
 
@@ -56,6 +58,7 @@ impl TantivyTableProvider {
         index_uid: IndexUid,
         index_uri: Uri,
         tantivy_schema: tantivy::schema::Schema,
+        timestamp_field: Option<String>,
     ) -> Self {
         let multi_valued_fields = collect_declared_multi_valued_fields(&schema);
         Self {
@@ -64,6 +67,7 @@ impl TantivyTableProvider {
             index_uid,
             index_uri,
             tantivy_schema,
+            timestamp_field,
             multi_valued_fields,
         }
     }
@@ -78,6 +82,7 @@ impl TantivyTableProvider {
             resolved.index_uid,
             resolved.index_uri,
             resolved.tantivy_schema,
+            resolved.timestamp_field,
         )
     }
 }
@@ -181,12 +186,210 @@ fn split_descriptor(
     ))
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SplitTimeRange {
+    start_secs: Option<i64>,
+    end_secs_exclusive: Option<i64>,
+}
+
+impl SplitTimeRange {
+    fn tighten_start(&mut self, start_secs: i64) {
+        self.start_secs = Some(match self.start_secs {
+            Some(previous) => previous.max(start_secs),
+            None => start_secs,
+        });
+    }
+
+    fn tighten_end(&mut self, end_secs_exclusive: i64) {
+        self.end_secs_exclusive = Some(match self.end_secs_exclusive {
+            Some(previous) => previous.min(end_secs_exclusive),
+            None => end_secs_exclusive,
+        });
+    }
+
+    fn is_empty(self) -> bool {
+        matches!(
+            (self.start_secs, self.end_secs_exclusive),
+            (Some(start), Some(end)) if start >= end
+        )
+    }
+}
+
+fn extract_split_time_range(filters: &[Expr], timestamp_field: Option<&str>) -> SplitTimeRange {
+    let Some(timestamp_field) = timestamp_field else {
+        return SplitTimeRange::default();
+    };
+    let mut time_range = SplitTimeRange::default();
+    for filter in filters {
+        collect_timestamp_filter(filter, timestamp_field, &mut time_range);
+    }
+    time_range
+}
+
+fn collect_timestamp_filter(expr: &Expr, timestamp_field: &str, time_range: &mut SplitTimeRange) {
+    let Expr::BinaryExpr(BinaryExpr { left, op, right }) = expr else {
+        return;
+    };
+
+    match op {
+        Operator::And => {
+            collect_timestamp_filter(left, timestamp_field, time_range);
+            collect_timestamp_filter(right, timestamp_field, time_range);
+        }
+        Operator::GtEq => {
+            if let (Some(column), Some(value)) = (column_name(left), timestamp_floor_secs(right))
+                && column == timestamp_field
+            {
+                time_range.tighten_start(value);
+            } else if let (Some(value), Some(column)) =
+                (timestamp_floor_secs(left), column_name(right))
+                && column == timestamp_field
+            {
+                time_range.tighten_end(value.saturating_add(1));
+            }
+        }
+        Operator::Gt => {
+            if let (Some(column), Some(value)) = (column_name(left), timestamp_floor_secs(right))
+                && column == timestamp_field
+            {
+                time_range.tighten_start(value.saturating_add(1));
+            } else if let (Some(value), Some(column)) =
+                (timestamp_ceil_secs(left), column_name(right))
+                && column == timestamp_field
+            {
+                time_range.tighten_end(value);
+            }
+        }
+        Operator::Lt => {
+            if let (Some(column), Some(value)) = (column_name(left), timestamp_ceil_secs(right))
+                && column == timestamp_field
+            {
+                time_range.tighten_end(value);
+            } else if let (Some(value), Some(column)) =
+                (timestamp_floor_secs(left), column_name(right))
+                && column == timestamp_field
+            {
+                time_range.tighten_start(value.saturating_add(1));
+            }
+        }
+        Operator::LtEq => {
+            if let (Some(column), Some(value)) = (column_name(left), timestamp_floor_secs(right))
+                && column == timestamp_field
+            {
+                time_range.tighten_end(value.saturating_add(1));
+            } else if let (Some(value), Some(column)) =
+                (timestamp_floor_secs(left), column_name(right))
+                && column == timestamp_field
+            {
+                time_range.tighten_start(value);
+            }
+        }
+        Operator::Eq => {
+            if let (Some(column), Some(value)) = (column_name(left), timestamp_floor_secs(right))
+                && column == timestamp_field
+            {
+                time_range.tighten_start(value);
+                time_range.tighten_end(value.saturating_add(1));
+            } else if let (Some(value), Some(column)) =
+                (timestamp_floor_secs(left), column_name(right))
+                && column == timestamp_field
+            {
+                time_range.tighten_start(value);
+                time_range.tighten_end(value.saturating_add(1));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn column_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Column(column) => Some(column.name()),
+        Expr::Cast(datafusion::logical_expr::Cast { expr, .. })
+        | Expr::TryCast(datafusion::logical_expr::TryCast { expr, .. }) => column_name(expr),
+        _ => None,
+    }
+}
+
+fn timestamp_floor_secs(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Literal(value, _) => scalar_timestamp_floor_secs(value),
+        Expr::Cast(datafusion::logical_expr::Cast { expr, .. })
+        | Expr::TryCast(datafusion::logical_expr::TryCast { expr, .. }) => {
+            timestamp_floor_secs(expr)
+        }
+        _ => None,
+    }
+}
+
+fn timestamp_ceil_secs(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Literal(value, _) => scalar_timestamp_ceil_secs(value),
+        Expr::Cast(datafusion::logical_expr::Cast { expr, .. })
+        | Expr::TryCast(datafusion::logical_expr::TryCast { expr, .. }) => {
+            timestamp_ceil_secs(expr)
+        }
+        _ => None,
+    }
+}
+
+fn scalar_timestamp_floor_secs(value: &ScalarValue) -> Option<i64> {
+    match value {
+        ScalarValue::TimestampSecond(Some(value), _) | ScalarValue::Int64(Some(value)) => {
+            Some(*value)
+        }
+        ScalarValue::TimestampMillisecond(Some(value), _) => Some(floor_div(*value, 1_000)),
+        ScalarValue::TimestampMicrosecond(Some(value), _) => Some(floor_div(*value, 1_000_000)),
+        ScalarValue::TimestampNanosecond(Some(value), _) => Some(floor_div(*value, 1_000_000_000)),
+        ScalarValue::Int32(Some(value)) => Some(i64::from(*value)),
+        ScalarValue::UInt32(Some(value)) => Some(i64::from(*value)),
+        ScalarValue::UInt64(Some(value)) => i64::try_from(*value).ok(),
+        _ => None,
+    }
+}
+
+fn scalar_timestamp_ceil_secs(value: &ScalarValue) -> Option<i64> {
+    match value {
+        ScalarValue::TimestampSecond(Some(value), _) | ScalarValue::Int64(Some(value)) => {
+            Some(*value)
+        }
+        ScalarValue::TimestampMillisecond(Some(value), _) => Some(ceil_div(*value, 1_000)),
+        ScalarValue::TimestampMicrosecond(Some(value), _) => Some(ceil_div(*value, 1_000_000)),
+        ScalarValue::TimestampNanosecond(Some(value), _) => Some(ceil_div(*value, 1_000_000_000)),
+        ScalarValue::Int32(Some(value)) => Some(i64::from(*value)),
+        ScalarValue::UInt32(Some(value)) => Some(i64::from(*value)),
+        ScalarValue::UInt64(Some(value)) => i64::try_from(*value).ok(),
+        _ => None,
+    }
+}
+
+fn floor_div(value: i64, divisor: i64) -> i64 {
+    value.div_euclid(divisor)
+}
+
+fn ceil_div(value: i64, divisor: i64) -> i64 {
+    value
+        .div_euclid(divisor)
+        .saturating_add(i64::from(value.rem_euclid(divisor) != 0))
+}
+
 async fn list_published_splits(
     metastore: &MetastoreServiceClient,
     index_uid: &IndexUid,
+    time_range: SplitTimeRange,
 ) -> DFResult<Vec<SplitMetadata>> {
-    let query =
+    if time_range.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut query =
         ListSplitsQuery::for_index(index_uid.clone()).with_split_state(SplitState::Published);
+    if let Some(start_secs) = time_range.start_secs {
+        query = query.with_time_range_start_gte(start_secs);
+    }
+    if let Some(end_secs) = time_range.end_secs_exclusive {
+        query = query.with_time_range_end_lt(end_secs);
+    }
     let request = ListSplitsRequest::try_from_list_splits_query(&query)
         .map_err(|err| DataFusionError::Internal(format!("failed to build split query: {err}")))?;
     metastore
@@ -236,10 +439,12 @@ impl TableProvider for TantivyTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
-        let splits = list_published_splits(&self.metastore, &self.index_uid).await?;
+        let time_range = extract_split_time_range(filters, self.timestamp_field.as_deref());
+        let splits = list_published_splits(&self.metastore, &self.index_uid, time_range).await?;
         debug!(
             index_uid = %self.index_uid,
             num_splits = splits.len(),
+            ?time_range,
             "planning tantivy split descriptors"
         );
 
@@ -272,6 +477,8 @@ impl TableProvider for TantivyTableProvider {
 
 #[cfg(test)]
 mod tests {
+    use datafusion::prelude::{col, lit};
+
     use super::*;
 
     fn schema(fields: Vec<Field>) -> SchemaRef {
@@ -315,6 +522,48 @@ mod tests {
         assert_eq!(
             translate_projection(&requested_schema, &inner_schema, Some(&vec![0, 2])).unwrap(),
             vec![2, 3]
+        );
+    }
+
+    #[test]
+    fn test_extract_split_time_range_from_timestamp_filters() {
+        let filters = vec![
+            col("timestamp").gt_eq(lit(ScalarValue::TimestampMicrosecond(
+                Some(1_704_074_400_000_000),
+                None,
+            ))),
+            col("timestamp").lt(lit(ScalarValue::TimestampMicrosecond(
+                Some(1_704_078_000_000_000),
+                None,
+            ))),
+        ];
+
+        let time_range = extract_split_time_range(&filters, Some("timestamp"));
+
+        assert_eq!(
+            time_range,
+            SplitTimeRange {
+                start_secs: Some(1_704_074_400),
+                end_secs_exclusive: Some(1_704_078_000),
+            }
+        );
+    }
+
+    #[test]
+    fn test_extract_split_time_range_handles_reversed_comparisons() {
+        let filters = vec![
+            lit(ScalarValue::TimestampMicrosecond(Some(1_500_000), None)).lt(col("timestamp")),
+            lit(ScalarValue::TimestampMicrosecond(Some(3_000_000), None)).gt_eq(col("timestamp")),
+        ];
+
+        let time_range = extract_split_time_range(&filters, Some("timestamp"));
+
+        assert_eq!(
+            time_range,
+            SplitTimeRange {
+                start_secs: Some(2),
+                end_secs_exclusive: Some(4),
+            }
         );
     }
 }
