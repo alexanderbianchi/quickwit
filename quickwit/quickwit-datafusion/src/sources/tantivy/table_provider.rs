@@ -23,11 +23,13 @@ use std::sync::Arc;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
 use datafusion::catalog::Session;
+use datafusion::common::project_schema;
 use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator, TableProviderFilterPushDown};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::scalar::ScalarValue;
+use datafusion_physical_plan::empty::EmptyExec;
 use quickwit_common::uri::Uri;
 use quickwit_metastore::{
     ListSplitsQuery, ListSplitsRequestExt, MetastoreServiceStreamSplitsExt, SplitMetadata,
@@ -162,6 +164,14 @@ fn build_unified_schema(ff_schema: &SchemaRef) -> SchemaRef {
     fields.push(Arc::new(Field::new("_score", DataType::Float32, true)));
     fields.push(Arc::new(Field::new("_document", DataType::Utf8, true)));
     Arc::new(Schema::new(fields))
+}
+
+fn empty_exec(
+    schema: &SchemaRef,
+    projection: Option<&Vec<usize>>,
+) -> DFResult<Arc<dyn ExecutionPlan>> {
+    let projected_schema = project_schema(schema, projection)?;
+    Ok(Arc::new(EmptyExec::new(projected_schema)))
 }
 
 fn split_descriptor(
@@ -448,6 +458,10 @@ impl TableProvider for TantivyTableProvider {
             "planning tantivy split descriptors"
         );
 
+        if splits.is_empty() {
+            return empty_exec(&self.schema, projection);
+        }
+
         let split_descriptors = splits
             .iter()
             .map(|split| {
@@ -523,6 +537,25 @@ mod tests {
             translate_projection(&requested_schema, &inner_schema, Some(&vec![0, 2])).unwrap(),
             vec![2, 3]
         );
+    }
+
+    #[test]
+    fn test_empty_exec_applies_projection() {
+        let requested_schema = schema(vec![
+            Field::new("severity", DataType::Utf8, true),
+            Field::new("timestamp", DataType::Int64, true),
+            Field::new("_document", DataType::Utf8, true),
+        ]);
+
+        let plan = empty_exec(&requested_schema, Some(&vec![2, 0])).unwrap();
+        let output_schema = plan.schema();
+        let field_names: Vec<_> = output_schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+
+        assert_eq!(field_names, vec!["_document", "severity"]);
     }
 
     #[test]
