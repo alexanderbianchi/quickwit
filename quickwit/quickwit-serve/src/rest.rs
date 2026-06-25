@@ -108,7 +108,9 @@ impl CompressionPredicate {
 
 impl Predicate for CompressionPredicate {
     fn should_compress<B>(&self, response: &http::Response<B>) -> bool
-    where B: http_body::Body {
+    where
+        B: http_body::Body,
+    {
         if let Some(size_above) = self.size_above_opt {
             size_above.should_compress(response)
         } else {
@@ -388,63 +390,63 @@ fn api_v1_routes(
     quickwit_services: Arc<QuickwitServices>,
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = Rejection> + Clone {
     let api_v1_root_url = warp::path!("api" / "v1" / ..);
-    api_v1_root_url.and(
-        elastic_api_handlers(
-            quickwit_services.cluster.clone(),
-            quickwit_services.node_config.clone(),
-            quickwit_services.search_service.clone(),
-            quickwit_services.ingest_service.clone(),
-            quickwit_services.ingest_router_service.clone(),
-            quickwit_services.metastore_client.clone(),
-            quickwit_services.index_manager.clone(),
-            !disable_ingest_v1(),
-            enable_ingest_v2(),
-        )
-        .or(cluster_handler(quickwit_services.cluster.clone()))
-        .boxed()
-        .or(node_info_handler(
-            BuildInfo::get(),
-            RuntimeInfo::get(),
-            quickwit_services.node_config.clone(),
-        ))
-        .boxed()
-        .or(indexing_get_handler(
-            quickwit_services.indexing_service_opt.clone(),
-        ))
-        .boxed()
-        .or(search_routes(quickwit_services.search_service.clone()))
-        .boxed()
-        .or(ingest_api_handlers(
-            quickwit_services.ingest_router_service.clone(),
-            quickwit_services.ingest_service.clone(),
-            quickwit_services.node_config.ingest_api_config.clone(),
-            !disable_ingest_v1(),
-            enable_ingest_v2(),
-        ))
-        .boxed()
-        .or(otlp_ingest_api_handlers(
-            quickwit_services.otlp_logs_service_opt.clone(),
-            quickwit_services.otlp_traces_service_opt.clone(),
-        ))
-        .boxed()
-        .or(index_management_handlers(
-            quickwit_services.index_manager.clone(),
-            quickwit_services.node_config.clone(),
-        ))
-        .boxed()
-        .or(delete_task_api_handlers(
-            quickwit_services.metastore_client.clone(),
-        ))
-        .boxed()
-        .or(jaeger_api_handlers(
-            quickwit_services.jaeger_service_opt.clone(),
-        ))
-        .boxed()
-        .or(index_template_api_handlers(
-            quickwit_services.metastore_client.clone(),
-        ))
-        .boxed(),
+    let routes = elastic_api_handlers(
+        quickwit_services.cluster.clone(),
+        quickwit_services.node_config.clone(),
+        quickwit_services.search_service.clone(),
+        quickwit_services.ingest_service.clone(),
+        quickwit_services.ingest_router_service.clone(),
+        quickwit_services.metastore_client.clone(),
+        quickwit_services.index_manager.clone(),
+        !disable_ingest_v1(),
+        enable_ingest_v2(),
     )
+    .or(cluster_handler(quickwit_services.cluster.clone()))
+    .boxed()
+    .or(node_info_handler(
+        BuildInfo::get(),
+        RuntimeInfo::get(),
+        quickwit_services.node_config.clone(),
+    ))
+    .boxed()
+    .or(indexing_get_handler(
+        quickwit_services.indexing_service_opt.clone(),
+    ))
+    .boxed()
+    .or(search_routes(quickwit_services.search_service.clone()))
+    .boxed()
+    .or(ingest_api_handlers(
+        quickwit_services.ingest_router_service.clone(),
+        quickwit_services.ingest_service.clone(),
+        quickwit_services.node_config.ingest_api_config.clone(),
+        !disable_ingest_v1(),
+        enable_ingest_v2(),
+    ))
+    .boxed()
+    .or(otlp_ingest_api_handlers(
+        quickwit_services.otlp_logs_service_opt.clone(),
+        quickwit_services.otlp_traces_service_opt.clone(),
+    ))
+    .boxed()
+    .or(index_management_handlers(
+        quickwit_services.index_manager.clone(),
+        quickwit_services.node_config.clone(),
+    ))
+    .boxed()
+    .or(delete_task_api_handlers(
+        quickwit_services.metastore_client.clone(),
+    ))
+    .boxed()
+    .or(jaeger_api_handlers(
+        quickwit_services.jaeger_service_opt.clone(),
+    ))
+    .boxed()
+    .or(index_template_api_handlers(
+        quickwit_services.metastore_client.clone(),
+    ))
+    .boxed();
+
+    api_v1_root_url.and(routes)
 }
 
 /// This function returns a formatted error based on the given rejection reason.

@@ -15,3 +15,4 @@
 //! Data source implementations for the DataFusion session layer.
 
 pub mod metrics;
+pub mod tantivy;

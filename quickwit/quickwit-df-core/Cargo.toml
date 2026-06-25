@@ -20,6 +20,7 @@ url = "2"
 
 arrow = { workspace = true }
 datafusion = "53"
+datafusion-proto = "53"
 datafusion-substrait = "53"
 datafusion-distributed = "1.0"
 object_store = "0.13"

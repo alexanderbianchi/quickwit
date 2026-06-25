@@ -47,6 +47,7 @@ use datafusion_distributed::{
 use datafusion_substrait::substrait::proto::Plan as SubstraitPlan;
 use futures::StreamExt;
 
+use crate::config::QuickwitConfig;
 use crate::session::DataFusionSessionBuilder;
 
 #[derive(Clone, Copy)]
@@ -443,6 +444,7 @@ impl DataFusionService {
         let ctx = self
             .builder
             .build_session_with_properties(request.properties)?;
+        let output = effective_output(request.output, &ctx);
         let prepared = self.prepare_logical_plan(request.input, &ctx).await?;
         let logical_plan_display = prepared.logical_plan.display_indent().to_string();
 
@@ -456,7 +458,7 @@ impl DataFusionService {
         let stream_creation_start = Instant::now();
         let mut analyze_execution_duration = None;
         let mut analyze_output_rows = None;
-        let stream = match request.output {
+        let stream = match output {
             DataFusionOutput::Records => {
                 execute_stream(Arc::clone(&physical_plan), ctx.task_ctx())?
             }
@@ -483,7 +485,7 @@ impl DataFusionService {
             stream,
             metadata: DataFusionExecutionMetadata {
                 input: prepared.input,
-                output: request.output,
+                output,
                 logical_plan: logical_plan_display,
                 physical_plan,
                 input_decode_duration: prepared.input_decode_duration,
@@ -717,12 +719,10 @@ impl DataFusionService {
         ctx: &SessionContext,
     ) -> DFResult<PreparedLogicalPlan> {
         let input_decode_start = Instant::now();
-        let plan: SubstraitPlan = serde_json::from_str(plan_json).map_err(|err| {
-            datafusion::error::DataFusionError::Plan(format!("invalid Substrait plan JSON: {err}"))
-        })?;
+        let (plan, plan_json) = decode_substrait_plan_json(plan_json)?;
         let input_decode_duration = input_decode_start.elapsed();
 
-        self.prepare_substrait_plan(plan, plan_json.to_string(), input_decode_duration, ctx)
+        self.prepare_substrait_plan(plan, plan_json, input_decode_duration, ctx)
             .await
     }
 
@@ -754,6 +754,42 @@ impl DataFusionService {
             input_decode_duration,
             logical_planning_duration,
         })
+    }
+}
+
+fn decode_substrait_plan_json(plan_json: &str) -> DFResult<(SubstraitPlan, String)> {
+    let mut value: serde_json::Value = serde_json::from_str(plan_json).map_err(|err| {
+        datafusion::error::DataFusionError::Plan(format!("invalid Substrait plan JSON: {err}"))
+    })?;
+    normalize_proto_json_any_type_fields(&mut value);
+
+    let normalized_plan_json = serde_json::to_string(&value).map_err(|err| {
+        datafusion::error::DataFusionError::Plan(format!(
+            "failed to normalize Substrait plan JSON: {err}"
+        ))
+    })?;
+    let plan = serde_json::from_value(value).map_err(|err| {
+        datafusion::error::DataFusionError::Plan(format!("invalid Substrait plan JSON: {err}"))
+    })?;
+    Ok((plan, normalized_plan_json))
+}
+
+fn normalize_proto_json_any_type_fields(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(type_url) = map.remove("@type") {
+                map.entry("typeUrl".to_string()).or_insert(type_url);
+            }
+            for value in map.values_mut() {
+                normalize_proto_json_any_type_fields(value);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                normalize_proto_json_any_type_fields(value);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -799,6 +835,23 @@ fn substrait_plan_json(plan: &SubstraitPlan) -> DFResult<String> {
             "failed to serialize Substrait plan JSON: {err}"
         ))
     })
+}
+
+fn effective_output(requested: DataFusionOutput, ctx: &SessionContext) -> DataFusionOutput {
+    if requested != DataFusionOutput::Explain {
+        return requested;
+    }
+
+    let state = ctx.state();
+    let Some(config) = state.config().options().extensions.get::<QuickwitConfig>() else {
+        return requested;
+    };
+
+    if config.explain_analyze {
+        DataFusionOutput::ExplainAnalyze
+    } else {
+        requested
+    }
 }
 
 async fn execute_plan_for_metrics(
@@ -1017,4 +1070,66 @@ fn duration_from_nanos_usize(nanos: usize) -> Duration {
 
 fn duration_as_millis_f64(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1_000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::session::DataFusionSessionBuilder;
+
+    #[test]
+    fn normalizes_proto_json_any_type_fields_recursively() {
+        let mut value = serde_json::json!({
+            "extension": {
+                "@type": "type.googleapis.com/example.Root",
+                "children": [
+                    {
+                        "@type": "type.googleapis.com/example.Child",
+                        "value": "abc"
+                    }
+                ]
+            },
+            "alreadyCanonical": {
+                "@type": "type.googleapis.com/example.Legacy",
+                "typeUrl": "type.googleapis.com/example.Canonical"
+            }
+        });
+
+        super::normalize_proto_json_any_type_fields(&mut value);
+
+        assert_eq!(
+            value["extension"]["typeUrl"],
+            "type.googleapis.com/example.Root"
+        );
+        assert!(value["extension"].get("@type").is_none());
+        assert_eq!(
+            value["extension"]["children"][0]["typeUrl"],
+            "type.googleapis.com/example.Child"
+        );
+        assert_eq!(
+            value["alreadyCanonical"]["typeUrl"],
+            "type.googleapis.com/example.Canonical"
+        );
+        assert!(value["alreadyCanonical"].get("@type").is_none());
+    }
+
+    #[test]
+    fn explain_analyze_property_upgrades_explain_only() {
+        let properties =
+            HashMap::from([("quickwit.explain_analyze".to_string(), "true".to_string())]);
+        let ctx = DataFusionSessionBuilder::new()
+            .build_session_with_properties(&properties)
+            .unwrap();
+
+        assert_eq!(
+            effective_output(DataFusionOutput::Explain, &ctx),
+            DataFusionOutput::ExplainAnalyze
+        );
+        assert_eq!(
+            effective_output(DataFusionOutput::Records, &ctx),
+            DataFusionOutput::Records
+        );
+    }
 }

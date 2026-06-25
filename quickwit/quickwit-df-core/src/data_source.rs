@@ -38,6 +38,8 @@ use datafusion::execution::SessionStateBuilder;
 use datafusion::logical_expr::{AggregateUDF, ScalarUDF};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::prelude::SessionConfig;
+use datafusion_distributed::DistributedExt;
+use datafusion_proto::physical_plan::PhysicalExtensionCodec;
 
 type SessionConfigSetter = Arc<dyn Fn(&mut SessionConfig) + Send + Sync>;
 
@@ -52,6 +54,7 @@ type SessionConfigSetter = Arc<dyn Fn(&mut SessionConfig) + Send + Sync>;
 pub struct QuickwitRuntimeRegistration {
     session_config_setters: Vec<SessionConfigSetter>,
     physical_optimizer_rules: Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>,
+    distributed_user_codecs: Vec<Arc<dyn PhysicalExtensionCodec>>,
     udfs: Vec<Arc<ScalarUDF>>,
     udafs: Vec<Arc<AggregateUDF>>,
     table_factories: Vec<(String, Arc<dyn TableProviderFactory>)>,
@@ -81,6 +84,11 @@ impl QuickwitRuntimeRegistration {
         rule: Arc<dyn PhysicalOptimizerRule + Send + Sync>,
     ) -> Self {
         self.physical_optimizer_rules.push(rule);
+        self
+    }
+
+    pub fn with_distributed_user_codec(mut self, codec: Arc<dyn PhysicalExtensionCodec>) -> Self {
+        self.distributed_user_codecs.push(codec);
         self
     }
 
@@ -115,6 +123,10 @@ impl QuickwitRuntimeRegistration {
             builder = builder.with_physical_optimizer_rule(rule);
         }
 
+        for codec in self.distributed_user_codecs {
+            builder = builder.with_distributed_user_codec_arc(codec);
+        }
+
         if !self.udfs.is_empty() {
             builder
                 .scalar_functions()
@@ -145,6 +157,8 @@ impl QuickwitRuntimeRegistration {
             .extend(other.session_config_setters);
         self.physical_optimizer_rules
             .extend(other.physical_optimizer_rules);
+        self.distributed_user_codecs
+            .extend(other.distributed_user_codecs);
         self.udfs.extend(other.udfs);
         self.udafs.extend(other.udafs);
         self.table_factories.extend(other.table_factories);

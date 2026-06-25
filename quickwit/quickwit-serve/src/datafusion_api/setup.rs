@@ -35,12 +35,15 @@ use quickwit_datafusion::proto::data_fusion_service_server::{
     DataFusionServiceServer, SERVICE_NAME as DATAFUSION_SERVICE_NAME,
 };
 use quickwit_datafusion::sources::metrics::MetricsDataSource;
+use quickwit_datafusion::sources::tantivy::TantivyDataSource;
 use quickwit_datafusion::{
     DataFusionService, DataFusionSessionBuilder, QuickwitObjectStoreRegistry,
-    QuickwitWorkerResolver, build_worker,
+    QuickwitSchemaProvider, QuickwitWorkerResolver, build_worker,
 };
 use quickwit_proto::metastore::MetastoreServiceClient;
-use quickwit_search::{SearchServiceClient, SearcherPool, create_search_client_from_grpc_addr};
+use quickwit_search::{
+    SearchServiceClient, SearcherContext, SearcherPool, create_search_client_from_grpc_addr,
+};
 use quickwit_storage::StorageResolver;
 use tokio::time::timeout;
 use tonic::transport::server::Router;
@@ -68,6 +71,7 @@ pub(crate) fn build_datafusion_session_builder(
     cluster_change_stream: ClusterChangeStream,
     metastore: MetastoreServiceClient,
     storage_resolver: StorageResolver,
+    searcher_context: Arc<SearcherContext>,
 ) -> anyhow::Result<Option<Arc<DataFusionSessionBuilder>>> {
     if !node_config.is_service_enabled(QuickwitService::Searcher) {
         return Ok(None);
@@ -76,8 +80,14 @@ pub(crate) fn build_datafusion_session_builder(
         return Ok(None);
     }
 
-    let metrics_source = Arc::new(MetricsDataSource::new(metastore));
+    let metrics_source = Arc::new(MetricsDataSource::new(metastore.clone()));
     let schema_source = Arc::clone(&metrics_source);
+    let tantivy_source = Arc::new(TantivyDataSource::new(
+        metastore,
+        storage_resolver.clone(),
+        searcher_context,
+    ));
+    let tantivy_schema_source = Arc::clone(&tantivy_source);
     let datafusion_worker_pool = setup_datafusion_worker_pool(
         cluster_change_stream,
         node_config.grpc_config.max_message_size,
@@ -88,10 +98,15 @@ pub(crate) fn build_datafusion_session_builder(
     let builder = DataFusionSessionBuilder::new()
         .with_object_store_registry(registry)
         .context("failed to install DataFusion object store registry")?
+        .with_runtime_plugin(Arc::clone(&tantivy_source) as Arc<_>)
+        .with_substrait_consumer(tantivy_source as Arc<_>)
         .with_runtime_plugin(Arc::clone(&metrics_source) as Arc<_>)
         .with_substrait_consumer(metrics_source as Arc<_>)
         .with_schema_provider_factory("quickwit", "public", move || {
-            schema_source.schema_provider()
+            Arc::new(QuickwitSchemaProvider::new(vec![
+                tantivy_schema_source.schema_provider(),
+                schema_source.schema_provider(),
+            ]))
         })
         .with_worker_resolver(worker_resolver);
     Ok(Some(Arc::new(builder)))

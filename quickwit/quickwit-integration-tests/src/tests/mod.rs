@@ -21,5 +21,6 @@ mod no_cp_tests;
 mod otlp_tests;
 #[cfg(feature = "sqs-localstack-tests")]
 mod sqs_tests;
+mod tantivy_datafusion_tests;
 mod tls_tests;
 mod update_tests;
