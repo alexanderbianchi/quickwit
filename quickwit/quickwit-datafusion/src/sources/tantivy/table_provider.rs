@@ -37,7 +37,7 @@ use quickwit_metastore::{
 };
 use quickwit_proto::metastore::{ListSplitsRequest, MetastoreService, MetastoreServiceClient};
 use quickwit_proto::types::IndexUid;
-use tantivy_datafusion::{SingleTableProvider, SplitDescriptor};
+use tantivy_datafusion::{SplitDescriptor, TantivyTableProvider as InnerTantivyTableProvider};
 use tracing::debug;
 
 use super::prepared_split_factory::QuickwitSplitPayload;
@@ -474,7 +474,7 @@ impl TableProvider for TantivyTableProvider {
             })
             .collect::<DFResult<Vec<_>>>()?;
 
-        let inner = SingleTableProvider::from_split_descriptors_with_fast_field_schema(
+        let inner = InnerTantivyTableProvider::from_split_descriptors_with_fast_field_schema(
             split_descriptors,
             build_inner_fast_field_schema(&self.schema),
         )?;

@@ -14,8 +14,8 @@
 
 //! Quickwit's bounded Rayon-backed [`SyncExecutionPool`] for tantivy work.
 //!
-//! Uses a **dedicated** [`ThreadPool`] so that DataFusion query execution does
-//! not share admission with the legacy search-service path.
+//! Uses a dedicated Quickwit thread pool so DataFusion query execution does not
+//! share admission with the legacy search-service path.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -23,27 +23,31 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use datafusion::common::Result;
 use datafusion::error::DataFusionError;
-use quickwit_common::thread_pool::ThreadPool;
+use quickwit_common::thread_pool::with_priority::ThreadPoolWithPriority;
 use tantivy_datafusion::SyncExecutionPool;
 
 /// Bounded Rayon-backed sync execution pool for tantivy CPU work.
 ///
-/// Wraps [`ThreadPool`] so the pool size is bounded to `num_cpus` (or a
-/// configured value) and scheduled-but-unstarted tasks are cancellable
-/// when the awaiting future is dropped.
+/// Wraps [`ThreadPoolWithPriority`] so the pool size is bounded to `num_cpus`
+/// (or a configured value), pending tasks are tracked, and
+/// scheduled-but-unstarted tasks are cancellable when the awaiting future is
+/// dropped.
 pub struct RayonSyncExecutionPool {
-    pool: ThreadPool,
+    pool: ThreadPoolWithPriority,
 }
 
 impl std::fmt::Debug for RayonSyncExecutionPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RayonSyncExecutionPool").finish_non_exhaustive()
+        f.debug_struct("RayonSyncExecutionPool")
+            .finish_non_exhaustive()
     }
 }
 
 impl RayonSyncExecutionPool {
-    pub fn new(pool: ThreadPool) -> Self {
-        Self { pool }
+    pub fn new(name: &'static str, num_threads: Option<usize>) -> Self {
+        Self {
+            pool: ThreadPoolWithPriority::new(name, num_threads),
+        }
     }
 
     /// Access the underlying Rayon thread pool, e.g. for setting
@@ -62,9 +66,7 @@ impl SyncExecutionPool for RayonSyncExecutionPool {
         self.pool
             .run_cpu_intensive(task)
             .await
-            .map_err(|_| {
-                DataFusionError::Internal("sync execution task panicked".to_string())
-            })?
+            .map_err(|_| DataFusionError::Internal("sync execution task panicked".to_string()))?
     }
 }
 
@@ -74,7 +76,7 @@ mod tests {
     use tantivy_datafusion::sync_exec::run_sync;
 
     fn test_pool() -> RayonSyncExecutionPool {
-        RayonSyncExecutionPool::new(ThreadPool::new("test-df-tantivy", Some(2)))
+        RayonSyncExecutionPool::new("test-df-tantivy", Some(2))
     }
 
     #[tokio::test]
@@ -87,10 +89,7 @@ mod tests {
     #[tokio::test]
     async fn rayon_pool_propagates_err() {
         let pool = test_pool();
-        let result = run_sync::<()>(&pool, || {
-            Err(DataFusionError::Internal("boom".into()))
-        })
-        .await;
+        let result = run_sync::<()>(&pool, || Err(DataFusionError::Internal("boom".into()))).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("boom"));
     }
@@ -98,9 +97,7 @@ mod tests {
     #[tokio::test]
     async fn rayon_pool_panic_returns_error() {
         let pool = test_pool();
-        let result = pool
-            .run_boxed(Box::new(|| panic!("intentional")))
-            .await;
+        let result = pool.run_boxed(Box::new(|| panic!("intentional"))).await;
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains("panicked"),

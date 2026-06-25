@@ -11903,7 +11903,7 @@ dependencies = [
 [[package]]
 name = "tantivy-datafusion"
 version = "0.1.0"
-source = "git+https://github.com/quickwit-oss/tantivy-datafusion?rev=f6925b2d577a23c6036959689a3d0164df586328#f6925b2d577a23c6036959689a3d0164df586328"
+source = "git+https://github.com/quickwit-oss/tantivy-datafusion?rev=2fb025eb585ecd34794732807db3cbe222d3e2b3#2fb025eb585ecd34794732807db3cbe222d3e2b3"
 dependencies = [
  "arrow",
  "async-trait",

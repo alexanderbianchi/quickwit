@@ -15,14 +15,14 @@
 //! Unit tests for the tantivy DataFusion data source.
 //!
 //! These tests create in-memory tantivy indexes, register them as
-//! DataFusion tables via `SingleTableProvider`, and execute SQL queries.
+//! DataFusion tables via `TantivyTableProvider`, and execute SQL queries.
 
 use std::sync::Arc;
 
 use arrow::array::{Array, Float64Array, Int64Array, RecordBatch};
 use datafusion::prelude::SessionContext;
 use tantivy::schema::{FAST, INDEXED, STORED, STRING, SchemaBuilder, TEXT};
-use tantivy_datafusion::{SingleTableProvider, full_text_udf};
+use tantivy_datafusion::{TantivyTableProvider, full_text_udf};
 
 /// Create a tantivy index in a temporary directory with the given documents.
 fn build_test_index(docs: &[serde_json::Value]) -> tantivy::Index {
@@ -88,7 +88,7 @@ fn sample_log_docs() -> Vec<serde_json::Value> {
 
 /// Register a tantivy index as a DataFusion table and execute SQL.
 async fn run_tantivy_sql(index: tantivy::Index, sql: &str) -> Vec<RecordBatch> {
-    let provider = SingleTableProvider::new(index);
+    let provider = TantivyTableProvider::new(index);
     let ctx = SessionContext::new();
     ctx.register_udf(full_text_udf());
     ctx.register_table("logs", Arc::new(provider)).unwrap();
@@ -272,7 +272,7 @@ async fn test_multi_split_query() {
     let index1 = build_test_index(&docs1);
     let index2 = build_test_index(&docs2);
 
-    let provider = SingleTableProvider::from_local_splits(vec![index1, index2]).unwrap();
+    let provider = TantivyTableProvider::from_local_splits(vec![index1, index2]).unwrap();
     let ctx = SessionContext::new();
     ctx.register_udf(full_text_udf());
     ctx.register_table("logs", Arc::new(provider)).unwrap();

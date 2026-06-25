@@ -109,9 +109,7 @@ impl TantivyDataSource {
         searcher_context: Arc<SearcherContext>,
     ) -> Self {
         let resolver = MetastoreTantivyResolver::new(metastore.clone());
-        let pool = sync_pool::RayonSyncExecutionPool::new(
-            quickwit_common::thread_pool::ThreadPool::new("df-tantivy-search", None),
-        );
+        let pool = sync_pool::RayonSyncExecutionPool::new("df-tantivy-search", None);
         let rayon_pool = pool.rayon_pool();
         Self {
             index_resolver: Arc::new(resolver),

@@ -162,6 +162,14 @@ impl ThreadPoolWithPriority {
         self.inner.max_running_tasks
     }
 
+    /// Returns the underlying Rayon pool for APIs that require a Rayon executor.
+    ///
+    /// Prefer [`Self::run_cpu_intensive`] for Quickwit-owned work so cancellation, priority, and
+    /// metrics stay applied.
+    pub fn get_underlying_rayon_thread_pool(&self) -> Arc<rayon::ThreadPool> {
+        Arc::clone(&self.inner.thread_pool)
+    }
+
     /// Schedules a cpu intensive function with a normal priority.
     /// If the result future is dropped before it is scheduled on the
     /// underlying thread pool, the task will be cancelled.
